@@ -1,0 +1,46 @@
+agentrouter-connector/
+├── README.md
+├── VERIFICATION.md
+├── FILE_MANIFEST.txt
+├── LICENSE
+├── package.json
+├── tsconfig.json
+├── .env.example
+├── .gitignore
+├── .dockerignore
+├── Dockerfile
+├── docker-compose.yml
+├── bin/
+│   └── ar_call.py
+├── skill/
+│   └── SKILL.md
+├── src/
+│   ├── index.ts
+│   ├── server.ts
+│   ├── mcp.ts
+│   ├── agentrouter.ts
+│   ├── router.ts
+│   ├── config.ts
+│   ├── catalog.ts
+│   ├── errors.ts
+│   ├── ledger.ts
+│   ├── redact.ts
+│   ├── retry.ts
+│   ├── semaphore.ts
+│   └── types.ts
+├── scripts/
+│   └── smoke.ts
+├── tests/
+│   ├── unit.test.ts
+│   └── url.test.ts
+├── docs/
+│   ├── PROCESS.md
+│   ├── CONNECT_TO_CHAT.md
+│   └── mcp-client.example.json
+└── .github/
+    └── workflows/
+        └── ci.yml
+
+Notes:
+- No .env file or API credential is included.
+- No node_modules/, dist/, data/, or __pycache__/ artifacts are included.

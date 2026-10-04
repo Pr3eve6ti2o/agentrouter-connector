@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "agentrouter": {
+      "url": "https://YOUR_HOST/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_AUTH_TOKEN}"
+      }
+    }
+  }
+}
