@@ -11,7 +11,8 @@ agentrouter-connector/
 ├── Dockerfile
 ├── docker-compose.yml
 ├── bin/
-│   └── ar_call.py
+│   ├── ar_call.py
+│   └── delegate.py
 ├── skill/
 │   └── SKILL.md
 ├── src/
