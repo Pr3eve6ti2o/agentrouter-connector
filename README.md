@@ -1,110 +1,79 @@
 # AgentRouter Connector
 
-A secure, high-throughput AgentRouter connector exposing:
+AgentRouter Connector contains two components: the original v2 HTTP connector at the repository root and a new stdio MCP server in [`mcp-server/`](mcp-server/).
 
-- **MCP** at `/mcp` for AI assistants and agents.
-- **OpenAI-compatible HTTP** at `/v1/models` and `/v1/chat/completions`.
+## Components
 
-The design preserves the attached `custom.agentrouter` secure-vault caller and adds a deployable gateway for other AI clients.
+### Original v2 HTTP connector
 
-## Security
+The original v2 connector lives at the repository root and provides an HTTP gateway with:
 
-The connector never logs raw upstream credentials. In the secure-vault runtime, `bin/ar_call.py` uses a short-lived `hsurr:*` surrogate and a host allowlist. In standalone mode, `AGENTROUTER_KEY`, `CONNECTOR_API_KEY`, and `MCP_AUTH_TOKEN` are separate secrets.
+- **MCP** at `/mcp`.
+- **OpenAI-compatible endpoints** at `/v1/models` and `/v1/chat/completions`.
 
-## Throughput
+Limits: `MAX_CONCURRENCY=8` and `MAX_BATCH_TASKS=32`.
 
-Use `MAX_CONCURRENCY`, bounded batch execution, async I/O, transient-error retries, `Retry-After`, streaming, and explicit model fallback to maximize practical utilization. These mechanisms do not bypass AgentRouter's own account/provider limits.
+### New stdio MCP server
 
-## Source vs current docs
+The stdio MCP server in [`mcp-server/`](mcp-server/) was **designed and written by GPT-6-Astra**. **Orion** handled the integration, build and registration into terminals.
 
-The attached build record is the source of truth for the existing `custom.agentrouter` secure-vault connector and its 2026-10-03 live test. Current AgentRouter public documentation now also describes a capability-first API and a hosted MCP service. See `docs/PROCESS.md`.
+- [Specification](mcp-server/SPEC.md)
+- [Build notes](mcp-server/BUILD-REPORT.md)
 
-## Install
+## Models
 
-```bash
-cp .env.example .env
-npm install
-npm run check
-npm test
-npm run build
-npm start
-```
+| Model | API | API URL | CLI |
+| --- | --- | --- | --- |
+| `gpt-6-astra` | Responses | `https://agentrouter.org/v1` | Codex CLI |
+| `deepseek-v4-flash` | Responses | `https://agentrouter.org/v1` | Codex CLI |
+| `claude-opus-5` | Anthropic Messages | `https://agentrouter.org/v1/messages` | Claude Code |
+| `claude-opus-4-8` | Anthropic Messages | `https://agentrouter.org/v1/messages` | Claude Code |
 
-## Endpoints
+Effort ranges from `low` to `max`. Two API keys are supported, with failover.
 
-```text
-GET  /health
-GET  /v1/models
-POST /v1/chat/completions
-POST /mcp
-```
+## MCP server (stdio)
 
-## Batch delegation runner — `bin/delegate.py`
+The stdio MCP server is in [`mcp-server/`](mcp-server/).
 
-A Python 3 script (standard library only, no packages to install) that runs a
-batch of prompts — a *job* — against external models through AgentRouter, in
-parallel, with spend caps and crash-safe results. It is built for audits,
-regression passes and research jobs where a run may take an hour or more.
+### Tools
 
-Calls go through `bin/ar_call.py` and its secure-vault credential by default.
-`delegate.py` finds it via the `AR_CALL` constant at the top of the file —
-edit that path if `ar_call.py` lives somewhere else. A task may instead carry
-its own `host` and `api_key` fields for a direct call.
-
-### Job file
-
-```json
-{
-  "name": "my-audit",
-  "per_run_cap_usd": 5.00,
-  "tasks": [
-    {
-      "id": "section-1",
-      "model": "claude-opus-5",
-      "messages": [{ "role": "user", "content": "Review this code: ..." }],
-      "max_tokens": 14000
-    }
-  ]
-}
-```
-
-Each task needs a unique `id`, a `model`, `messages`, and `max_tokens`.
-Optional per-task fields: `host`, `api_key`, and `no_reword` (see Retries).
-
-### Run it
-
-```bash
-python3 bin/delegate.py --job job.json --out ./results
-python3 bin/delegate.py --job job.json --out ./results --workers 8
-python3 bin/delegate.py --job job.json --out ./results --no-resume
-```
-
-| Flag | Meaning |
+| Tool | Description |
 | --- | --- |
-| `--job PATH` | Job JSON file (required). |
-| `--out DIR` | Results directory (required); created if missing. |
-| `--workers N` | Parallel tasks (default 4). |
-| `--ledger PATH` | Spend ledger file (default alongside the skill). |
-| `--monthly-cap-usd USD` | Refuse to start if this month's ledger total plus the run estimate would exceed the cap. |
-| `--no-resume` | Ignore saved results and re-run every task. |
+| `agentrouter_list_models` | Returns the gateway’s live model list per key. |
+| `agentrouter_chat` | Makes a single call with a model and a prompt. |
+| `agentrouter_batch_chat` | Runs calls in parallel, with a maximum of 8 concurrent calls and 32 calls per batch. |
+| `agentrouter_health` | Checks per-key status via `GET /v1/models`, with no spend. |
+| `agentrouter_diagnose` | Probes key × model combinations, classifies errors and reports ledger totals. |
+| `agentrouter_generate_config` | **WARNING: WRITES** to the real `~/.codex/config.toml` and `~/.claude/settings.json` files. |
 
-### Behaviour
+### Quickstart
 
-- **Spend guardrails.** A job must set `per_run_cap_usd`; the run is refused
-  without one. Cost is estimated up front from per-model rates, and actual
-  usage is appended to the ledger when the run ends.
-- **Retries.** A blank or very short response is retried up to 3 attempts and
-  is never counted as a success. The third attempt normally uses a reworded
-  prompt; set `"no_reword": true` on a task to retry the original prompt
-  verbatim instead (recommended for audits, where the brief must not change).
-- **Crash safety and resume.** Each result is written atomically to
-  `<out>/<task-id>.json` the moment its task finishes, and `progress.json`
-  is updated after every task; `summary.json` is written at the end.
-  Re-running the same command resumes where it stopped — tasks already saved
-  as successful are skipped, not re-run and not billed again.
-- **Redaction.** Secret-like spans (API keys, seed phrases) are stripped from
-  every prompt before anything is sent.
+1. Clone this repository, then enter the cloned directory.
+2. Enter the server directory and install dependencies:
 
-Each result file records `ok`, the returned `text`, token usage, the number
-of `attempts`, and any error — a failed task is saved as a failure, never as
-an empty success.
+   ```sh
+   cd mcp-server
+   npm install
+   ```
+
+3. Set the 14 environment variables.
+4. Build the server:
+
+   ```sh
+   npm run build
+   ```
+
+5. Register the stdio MCP server.
+
+See [`mcp-server/README.md`](mcp-server/README.md) for full setup details, including the environment variables and registration instructions.
+
+### Authorship
+
+- **Design (`SPEC.md`) and code:** GPT-6-Astra via AgentRouter, using both APIs.
+- **[glue] Orion:** Glue, scaffolding, build and registration.
+
+## Repository layout
+
+- `src/`, `bin/`, `Dockerfile`, `docker-compose.yml` — the original v2 HTTP connector (the gateway). Its own docs are in `docs/PROCESS.md` and `docs/CONNECT_TO_CHAT.md`.
+- `mcp-server/` — the stdio MCP server: `README.md` (setup and usage), `SPEC.md` (the design), `BUILD-REPORT.md` (build and glue log).
+- `docs/MCP-SERVER.md` — troubleshooting and operations for the stdio MCP server.

@@ -1,0 +1,13 @@
+{
+  "keys": {
+    "key1": "AGENTROUTER_KEY_1",
+    "key2": "AGENTROUTER_KEY_2"
+  },
+  "models": {
+    "gpt-6-astra": {"api": "responses", "base": "https://agentrouter.org/v1", "terminal": "Codex", "effort": "max", "context": 1050000},
+    "deepseek-v4-flash": {"api": "responses", "base": "https://agentrouter.org/v1", "terminal": "Codex", "effort": "max", "context": 1048576},
+    "claude-opus-5": {"api": "anthropic", "base": "https://agentrouter.org", "terminal": "Claude Code", "effort": "max", "context": 1000000},
+    "claude-opus-4-8": {"api": "anthropic", "base": "https://agentrouter.org", "terminal": "Claude Code", "effort": "max", "context": 1000000}
+  },
+  "caps": {"maxConcurrency": 8, "maxBatchTasks": 32}
+}
