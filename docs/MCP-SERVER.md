@@ -54,6 +54,18 @@ A `502` is transient, but **batch does not yet retry `502` failures**.
 
 The known implementation gap is that `chatWithRetry` is **not wired into batch**. Retry affected batch requests explicitly rather than assuming the batch path will recover automatically.
 
+## Responses API state mismatch
+
+AgentRouter API 2 can return:
+
+> The requested item was created under a different Azure OpenAI resource
+
+Responses API state, including `resp_` IDs, reasoning items and conversation items, is stored on a single Azure resource behind the gateway. API 2 uses a multi-resource pool without sticky routing. A chained follow-up that uses `previous_response_id` or passes output items back fails with this error if it is routed to a different resource.
+
+This affects stateful chained clients, such as long Codex sessions. It does not affect this MCP server or stateless runners: every call is a fresh, complete prompt with no `previous_response_id`. The error does not indicate a dead key, quota exhaustion or a configuration fault.
+
+Start a fresh stateless request; do not resume the chain. Retrying the same chain may keep failing. `agentrouter_health` and `agentrouter_list_models` are not needed for this error. `agentrouter_diagnose` classifies this response body as kind `upstream-state-mismatch`.
+
 ## Security
 
 - Keep keys **only in environment variables**.

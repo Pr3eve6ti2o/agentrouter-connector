@@ -9,10 +9,20 @@ import { probe, readLedgerTotals } from "../upstream.js";
 // --- R-10a1a (Astra, verbatim) ---
 type StatusKind =
   | "ok" | "auth-client" | "auth-token" | "pool-exhausted"
-  | "bad-request" | "rate-limited" | "no-channel" | "unknown";
+  | "bad-request" | "rate-limited" | "no-channel" | "unknown"
+  // [Orion] 2026-10-23 addition (user order): Azure resource state-mismatch
+  // kind, added next to Astra's taxonomy above.
+  | "upstream-state-mismatch";
 
 // [glue] `export` added: smoke-test.ts imports this classifier.
 export function classifyStatus(status: number, bodyText: string): { kind: StatusKind; fix: string } {
+  // [Orion] 2026-10-23 addition (user order): checked BEFORE the generic 400
+  // bucket — Responses-API state (resp_…/reasoning/conversation items) is
+  // pinned to one upstream Azure resource; a chained follow-up routed to a
+  // different resource in the gateway pool fails with this body text.
+  if (/different Azure OpenAI resource/i.test(bodyText)) {
+    return { kind: "upstream-state-mismatch", fix: "State from a previous response is pinned to a different upstream Azure resource. Start a fresh stateless request — do not pass previous_response_id or prior output items; retrying the same chain may keep failing. Stateless callers (this MCP) are unaffected." };
+  }
   switch (status) {
     case 200:
       return { kind: "ok", fix: "No action needed." };
