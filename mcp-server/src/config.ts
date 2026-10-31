@@ -37,6 +37,22 @@ export function loadConfig(source: NodeJS.ProcessEnv = env) {
     return value;
   };
 
+  const optional = <T>(
+    name: string, fallback: T, parse: (value: string) => T | undefined
+  ): T => {
+    const value = source[name]?.trim();
+    return value ? parse(value) ?? fallback : fallback;
+  };
+
+  const clampedInteger = (min: number, max: number) =>
+    (raw: string): number | undefined => {
+      if (!/^[+-]?\d+$/.test(raw)) return undefined;
+      const value = Number(raw);
+      return Number.isInteger(value)
+        ? Math.min(max, Math.max(min, value))
+        : undefined;
+    };
+
   const apiKeys = [...new Set(
     [source.AGENTROUTER_KEY_1, source.AGENTROUTER_KEY_2]
       .map(key => key?.trim()).filter((key): key is string => !!key)
@@ -65,7 +81,36 @@ export function loadConfig(source: NodeJS.ProcessEnv = env) {
     "claude-opus-5": model("anthropic", "AGENTROUTER_CLAUDE_OPUS_5"),
     "claude-opus-4-8": model("anthropic", "AGENTROUTER_CLAUDE_OPUS_4_8"),
   });
-  return Object.freeze({ apiKeys: Object.freeze(apiKeys), models, caps });
+
+  const hosts = optional<string[]>(
+    "AGENTROUTER_HOSTS",
+    ["agentrouter.org", "ps.air-outer.com"],
+    raw => {
+      const parsed = [...new Set(
+        raw.split(",").map(host => host.trim()).filter(host => !!host)
+      )];
+      const hostname = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$/i;
+      return parsed.length && parsed.every(host =>
+        host.length <= (host.endsWith(".") ? 254 : 253) && hostname.test(host)
+      )
+        ? parsed
+        : undefined;
+    }
+  );
+  const retryRounds = optional(
+    "AGENTROUTER_RETRY_ROUNDS", 3, clampedInteger(1, 10)
+  );
+  const timeoutMs = optional(
+    "AGENTROUTER_TIMEOUT_MS", 600000, clampedInteger(10000, 600000)
+  );
+  const astraMaxTokens = optional(
+    "AGENTROUTER_ASTRA_MAX_TOKENS", 12000, clampedInteger(1000, 16000)
+  );
+
+  return Object.freeze({
+    apiKeys: Object.freeze(apiKeys), models, caps,
+    hosts, retryRounds, timeoutMs, astraMaxTokens,
+  });
 }
 
 // Validate on import. Never log this credential-bearing object to MCP stdout.

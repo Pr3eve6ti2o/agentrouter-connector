@@ -267,6 +267,8 @@ You should see: Each required variable name is listed once with count `1` — 14
 
 `.env` lives at `mcp-server/.env`. Sourcing it in a shell only affects that shell (see section 7). The client-launched server in section 9 needs the full set of environment variables—both keys and all 12 limit values—through the client configuration, because the server does not read `.env` by itself.
 
+**MCP v2 (2026-10-31) optional variables, all with defaults — a server started with only the original 14 variables keeps working unchanged:** `AGENTROUTER_HOSTS` (default `agentrouter.org,ps.air-outer.com`), `AGENTROUTER_RETRY_ROUNDS` (default `3`), `AGENTROUTER_TIMEOUT_MS` (default `600000`), `AGENTROUTER_ASTRA_MAX_TOKENS` (default `12000`).
+
 ## 6. Build
 
 `<repository-root>` is the checkout root, so the server directory is `<repository-root>/mcp-server`.
@@ -503,7 +505,7 @@ Discovery proves that the MCP exchange works. It does **not** prove that any mod
 
 ## 11. First routed request
 
-This is a live request and may use paid quota. Set effort to **low** for this check. Effort can go up to **max** for harder work — see section 12.
+This is a live request and may use paid quota. Set effort to **low** for this check — except for `gpt-6-astra`, where `low` is rejected with a clear error in MCP v2; for Astra, omit effort instead. Effort can go up to **max** for harder work — see section 12.
 
 1. Choose a model ID returned by `agentrouter_list_models` for your key. The list is dynamic: do not copy a model ID from an old example.
 2. Replace `<model-id>` below with that ID, then paste this prompt into the client:
@@ -548,11 +550,11 @@ Use this to find the model IDs you can use. The list is **dynamic**: listing a m
 
 ### `agentrouter_chat`
 
-Send one prompt to one model. Set `effort` to `low` for checks; effort can go up to `max` for harder work. Do not assume other effort values, defaults or limits beyond this guidance.
+Send one prompt to one model. Set `effort` to `low` for checks — except for `gpt-6-astra`, where `low` is rejected; for Astra, omit effort (no reasoning field is sent) or use `max`. Effort can go up to `max` for harder work.
 
-Failover on 401, 402 or 503 follows configuration order. A 502 does **not** trigger failover.
+**MCP v2 rotation and failover (supersedes the pre-v2 502 gap):** requests rotate over host × key combos in order `agentrouter.org/key1`, `agentrouter.org/key2`, `ps.air-outer.com/key1`, `ps.air-outer.com/key2`, then repeat, for up to `AGENTROUTER_RETRY_ROUNDS` rounds (default 3 = 12 attempts), with a 2–5 s plus jitter pause between attempts. Retryable: 401, 402, 403, 429, 502, 503, 504, plus transport failures (fetch throw, connection closed, timeout). Non-retryable: 400, 404 and other 4xx break immediately. Responses timeout is 600 s by default; Anthropic `/messages` is 120 s unless overridden. For `gpt-6-astra`, `agentrouter_chat` defaults to 12000 output tokens (`AGENTROUTER_ASTRA_MAX_TOKENS`), caller-overridable to at most 16000.
 
-The server appends a local ledger entry `{timestamp, model, tokens}` to `ledger.jsonl` by default, or to the path set by `AGENTROUTER_LEDGER_PATH`. Relative paths are resolved against the server process working directory. Ledger writes are best-effort and must not fail the chat. The repo files do not state whether failures or failover attempts are recorded.
+The server appends a local ledger entry to `ledger.jsonl` by default, or to the path set by `AGENTROUTER_LEDGER_PATH`, carrying timestamp, model, tokens, host, key **index** (never a key value), status (or `null` for transport failure), error kind, attempts used, latency, and reasoning/text tokens. Relative paths are resolved against the server process working directory. Ledger writes are best-effort and must not fail the chat.
 
 For the default ledger, run `tail -n 1 ledger.jsonl` in a shell from the server process working directory. If the path is overridden, use `tail -n 1` on the configured ledger file instead. Correlate the entry’s timestamp and model with your request; do not assume the latest entry belongs to it.
 
@@ -560,11 +562,11 @@ For the default ledger, run `tail -n 1 ledger.jsonl` in a shell from the server 
 
 ### `agentrouter_batch_chat`
 
-Send several requests in one batch. A batch accepts at most **32 tasks**; more throws a `RangeError`. Concurrency is capped at **8 tasks at once**, with a default pool of 8. Split larger jobs into separate batches.
+Send several requests in one batch. A batch accepts at most **32 tasks**; more throws a `RangeError`. Concurrency is capped at **8 tasks at once**, with a default of 1 (sequential) when any task uses `gpt-6-astra`, otherwise 8; the caller may override 1–8. Split larger jobs into separate batches.
 
-Per-item results are `ok`/`error` pairs in request order. Partial failure is normal: a failed item does not fail the whole batch. The input and ledger gaps in the matrix still apply; do not treat this as a complete batch contract.
+Per-item results are `ok`/`error` pairs in request order, each carrying index, attempts used, host and `keyIndex`, plus a classified kind on failures, so a caller can re-submit only failed tasks. Partial failure is normal: a failed item does not fail the whole batch.
 
-**Warning: batch does NOT retry 502 failures — `chatWithRetry` is not wired into batch. Retry affected batch requests explicitly; do not assume the batch path recovers.**
+**MCP v2: batch now retries every task through the same host × key rotation as a single chat.** The pre-v2 warning that batch does not retry 502 failures no longer applies.
 
 **You should see:** a response or a per-item error for each request.
 ### `agentrouter_health`
@@ -575,8 +577,8 @@ The repo files do not state complete input contracts for these three tools. This
 
 | Tool | Known | Gap or not stated in the repo files |
 |---|---|---|
-| `agentrouter_health` | Reports current router health. | Check scope (local state versus live provider validation), whether checks send provider requests, and whether they create ledger entries are not stated. |
-| `agentrouter_diagnose` | Runs failure diagnostics. | Full report fields/schema are not stated. HTTP 502 does not trigger failover. |
+| `agentrouter_health` | Reports current router health, probing both hosts per host × key. | Check scope (local state versus live provider validation), whether checks send provider requests, and whether they create ledger entries are not stated. |
+| `agentrouter_diagnose` | Runs failure diagnostics, probing both hosts, and reports per-combo success rates over the last 60 minutes from the ledger. | Full report fields/schema are not stated. |
 | `agentrouter_generate_config` | Writes real client configuration files. | Preservation of unrelated settings, partial-write/failure behaviour and change logging are not stated. |
 
 Paste:
@@ -589,11 +591,11 @@ Paste:
 
 Run diagnostic checks when a request fails.
 
-If you configure two keys, failover follows their configuration order. HTTP **401, 402 and 503** trigger a retry with the next key. HTTP **502 does not trigger failover** — this is a known gap. If you receive a 502, do not assume the second key was tried.
+If you configure two keys, failover follows host × key rotation (see section 12). HTTP **401, 402, 403, 429, 502, 503, 504**, plus transport failures, trigger rotation to the next combo; 400, 404 and other 4xx do not retry. The pre-v2 statement that 502 does not trigger failover no longer applies.
 
 The build report records a default probe scope of **four models × two keys**. In the **2026-10-23** live run, `gpt-6-astra` returned `200/ok` on both keys; the other three models returned `503 no-channel`. These are recorded results, not a guarantee of current availability.
 
-The only diagnose classification stated in the repo files is `state-mismatch` → `upstream-state-mismatch`. The report’s full fields/schema are not stated; do not treat this mapping as a complete result specification.
+Diagnose classifications in MCP v2 include `upstream-state-mismatch` (including the exact body "created under a different Azure OpenAI resource" — see `docs/MCP-SERVER.md`), `upstream-transient` (502/504/transport), and `pool-quota-403` (403 quota, distinct from 402). The report’s full fields/schema are not stated; do not treat this mapping as a complete result specification.
 
 Paste:
 
@@ -685,7 +687,7 @@ No — a 402 is a budget-pool problem. Pools refill, but no refill timing is giv
 
 **Will a failed batch request retry itself, including on 502?**
 
-No — batch does not retry 502 failures, and 502 does not trigger key failover. Retry affected batch requests explicitly. No retry-limit or back-off values are specified in the repo files. See sections 12 and 13.
+Yes, in MCP v2 — batch retries every task through the same host × key rotation as a single chat (default 3 rounds, 2–5 s plus jitter between attempts). This supersedes the pre-v2 answer. See sections 12 and 13.
 
 **Does a quiet terminal mean startup failed?**
 
