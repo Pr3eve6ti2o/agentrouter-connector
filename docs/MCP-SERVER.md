@@ -1,6 +1,28 @@
 # AgentRouter MCP server: troubleshooting and operations
 Operational requirements and recovery procedures for the AgentRouter MCP server in `mcp-server/`.
 
+## How to run it (short version)
+
+This document is the troubleshooting companion — the full run guide is [`mcp-server/README.md`](../mcp-server/README.md) (§5 install and environment, §6 build, §7 smoke, §9 registration). In short, from `mcp-server/`:
+
+```sh
+npm install
+npm run build
+npm run smoke
+```
+
+Then register the server in Codex and/or Claude Code (guide §9) and restart the client session. The server is a local stdio process (`node dist/src/server.js`): there is no browser URL, and `stdout` is MCP traffic only. A server started with only the original 14 environment variables keeps working; the four optional v2 variables listed below simply use their defaults.
+
+## What this server takes care of
+
+- Routing your prompt to AgentRouter and rotating host × key combos until a transient failure clears or the retry budget (default 3 rounds = 12 attempts) runs out.
+- Classifying failures by status *and* body, so a 401 header rejection, a 402/403 quota problem, a 503 off-list model, a 502/disconnect lottery failure, and a chained-state mismatch are never confused with each other.
+- Recording every attempt in a local ledger (`ledger.jsonl` by default) with host, key index, kind, attempts and latency — never a key value — and reporting per-combo success rates in `agentrouter_diagnose`.
+- Applying safe Astra defaults: 12,000 output tokens (overridable to 16,000), sequential batches, and rejecting `low` effort for Astra.
+- It does **not** provision accounts, grant quota, make a model available, fix the gateway, or protect a chained Codex session (see "What this upgrade does not do" below).
+
+![Request flow](../mcp-server/assets/request-flow.svg)
+
 ## Startup requirements
 
 The server requires 14 environment variables; startup throws if any one is missing.

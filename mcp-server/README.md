@@ -1,5 +1,12 @@
 # AgentRouter MCP Server
 
+[![GitHub stars](https://img.shields.io/github/stars/Pr3eve6ti2o/agentrouter-connector?style=social)](https://github.com/Pr3eve6ti2o/agentrouter-connector/stargazers)
+![Node.js](https://img.shields.io/badge/node-%3E%3D20-brightgreen)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.9-blue)
+![MCP](https://img.shields.io/badge/MCP-stdio-purple)
+
+![Request flow](assets/request-flow.svg)
+
 ## 1. Scope and non-goals
 
 This guide takes you from local setup to your first routed request. It is for readers who already have a repository checkout and two AgentRouter keys and want to set up a local MCP server. It covers setup, registration with your MCP client, the six tools, troubleshooting and updating.
@@ -46,7 +53,9 @@ The server is a local Node.js process from `mcp-server/`, with entry point `dist
 
 The configuration loader validates on import. The user owns preparing the configuration and running the checks; the key holder owns the secrets used by that configuration.
 
-The server sends upstream requests through AgentRouter to the Azure pool. Failover tries configured keys in configuration order on `401`, `402` or `503`; `502` does not trigger failover. This routing does not transfer ownership of provisioning, models, channels or quota to the local server.
+The server sends upstream requests through AgentRouter to the Azure pool. In MCP v2, requests rotate over host × key combos (`agentrouter.org/key1` → `agentrouter.org/key2` → `ps.air-outer.com/key1` → `ps.air-outer.com/key2`, then repeat, up to 3 rounds by default), retrying 401, 402, 403, 429, 502, 503, 504 and transport failures, and stopping immediately on 400, 404 and other 4xx. This routing does not transfer ownership of provisioning, models, channels or quota to the local server.
+
+**MCP v2 at a glance — what this server takes care of:** rotating hosts and keys until a transient failure clears (or the retry budget runs out); classifying failures by status *and* body (so a 401 header rejection is never mistaken for a dead key); recording every attempt in a local ledger with host, key index, kind, attempts and latency — never a key value; probing both hosts for health and diagnosis; and applying safe Astra defaults (12,000 tokens, sequential batches, `low` effort rejected). It does not provision accounts, grant quota, make a model available, fix the gateway, or protect a chained Codex session. Full troubleshooting: [docs/MCP-SERVER.md](../docs/MCP-SERVER.md).
 
 Check launch, MCP exchange and upstream execution separately. A running process does not prove a successful MCP exchange. A successful MCP exchange does not, by itself, prove that the Azure pool executed a request.
 
@@ -261,7 +270,7 @@ Keep `_CONTEXT_TOKENS` / `_EFFORT_MIN` / `_EFFORT_MAX` at `1050000 / low / max` 
 
 **Pass condition:** every required name occurs exactly once with a non-empty, non-placeholder value.
 
-You should see: Each required variable name is listed once with count `1` — 14 lines for a two-key configuration, 13 for a one-key configuration — with no values printed. If any count is `0` or more than `1`, stop, add the missing entry or remove duplicates in `.env`, then rerun the check. Only proceed when every count is `1` and every required value is non-empty and not a placeholder.
+You should see: Each required variable name is listed once with count `1` — 14 lines for a two-key configuration, 13 for a one-key configuration — with no values printed. If any count is `0` or more than `1`, stop, add the missing entry or remove duplicates in `.env`, then rerun the check. Only proceed when every count is `1` and every required value is non-empty and not a placeholder. The four optional MCP v2 variables (`AGENTROUTER_HOSTS`, `AGENTROUTER_RETRY_ROUNDS`, `AGENTROUTER_TIMEOUT_MS`, `AGENTROUTER_ASTRA_MAX_TOKENS`) are extra — they are not counted in the 14/13, and omitting them simply uses their defaults.
 
 ### Step 5 — Final note
 
@@ -423,6 +432,8 @@ You should see:
 - Status: `enabled`.
 
 `enabled` does **not** prove launch, handshake, credentials, quota or failover.
+
+You may add the optional MCP v2 variables with extra `--env` entries (for example `--env AGENTROUTER_RETRY_ROUNDS=3`); omitting them uses the defaults in section 5. Re-register (or edit the client config and restart the server process) after changing any variable — the client-launched server does not pick up shell exports.
 ### Claude Code 2.1.308
 
 Install Claude Code:
@@ -466,6 +477,8 @@ agentrouter Connected
 ```
 
 `Connected` does NOT prove launch, handshake, credentials, quota or failover.
+
+You may add the optional MCP v2 variables with extra `-e` entries; omitting them uses the defaults in section 5. Re-register (or edit the client config and restart the server process) after changing any variable.
 
 **One-key note:** Remove the `AGENTROUTER_KEY_2` entry, leaving 13 environment entries in total. Removing it does not remove any limit requirement, and one key leaves no fallback. Two keys do not prove both work.
 
@@ -539,8 +552,8 @@ Use the tool names and schemas your client reports for your build. The repo file
 | Tool | Known | Not stated in the repo files |
 | --- | --- | --- |
 | `agentrouter_list_models` | Returns a dynamic list of model IDs. | Complete input contract. |
-| `agentrouter_chat` | Sends one prompt to one model; supports the `low`/`max` effort guidance below. | Complete input contract; effort values, defaults and limits beyond that guidance; ledger coverage of failures or failover attempts. |
-| `agentrouter_batch_chat` | Up to 32 tasks; concurrency cap 8; ordered per-item results. | Per-item input contract beyond model + prompt; cap-violation handling beyond the 32-task limit; per-item ledger behaviour. |
+| `agentrouter_chat` | Sends one prompt to one model; supports the `low`/`max` effort guidance below, except Astra rejects `low`. Rotates host × key (see below). | Complete input contract beyond that guidance. |
+| `agentrouter_batch_chat` | Up to 32 tasks; concurrency cap 8, default 1 for Astra, otherwise 8; ordered per-item results with attempts, host, keyIndex and kind; retries every task through the same rotation. | Per-item input contract beyond model + prompt; cap-violation handling beyond the 32-task limit. |
 
 ### `agentrouter_list_models`
 
@@ -638,7 +651,7 @@ Quietness alone is never failure. For **every upstream diagnosis, capture both t
 | **401** with a body mentioning **invalid token** | The key is missing, malformed, expired or rejected. | Correct or replace the key in the process environment, then restart the process. | Authentication is accepted; the invalid-token error clears. |
 | **402** with a **budget-pool error** in the body | The pool cannot authorise spend. | Check pool assignments: the repo files do **not** say whether the keys share a pool. **If they use different pools**, fail over to the other key. **If they share a pool**, replenish or reassign the pool instead; replenishing or reassigning is also an alternative to failover. Pools refill, but no refill timing is given. | Once the selected pool can authorise spend, the budget-pool rejection clears. |
 | **503** with a **no-channel** body | No eligible route exists for the request. The model list is dynamic. | Fetch the live list; do not treat dated snapshots as a catalogue. The 2026-10-23 and 2026-10-28 snapshots listed `gpt-5.6-sol`, `gpt-6-astra` and `gpt-6.1-sol`; DeepSeek and Opus were off-list with 503. | A request using a currently routable model reaches an eligible route instead of returning 503/no-channel. |
-| Intermittent `502` | Transient upstream failure. The ~1-in-5 observation is dated 2026-10-24 and is **not a guarantee**. | Retry the affected request. A `502` does **not** trigger key failover in the server, and batch does **not** retry `502`; retry affected batch requests explicitly. | The affected request may succeed on retry once the upstream fault clears. |
+| Intermittent `502` | Transient upstream failure. The ~1-in-5 observation is dated 2026-10-24 and is **not a guarantee**. | In MCP v2, retry is automatic: the server rotates host × key (default 3 rounds) and batch retries every task the same way. No manual retry is needed unless the retry budget is exhausted. | The affected request may succeed on a later combo once the upstream fault clears. |
 | Azure state-mismatch on chained Responses | Responses state is pinned to one Azure resource. This does **not** affect the MCP server or stateless runners. | Start a fresh stateless request. Omit `previous_response_id` and other resource-bound references; do **not** resume the chain. | No chained-state mismatch on the fresh request. `diagnose` classifies the original failure as `upstream-state-mismatch`. |
 | Startup environment-validation errors | Missing or malformed variables in the client-launched process. | Correct the client’s environment configuration, then restart the launched process. Do not assume a GUI client inherits terminal exports. | Startup completes without environment-validation errors. |
 | Quiet terminal / no browser URL / malformed stdio messages | The stdio server waits for MCP messages. Non-MCP output on stdout can corrupt messages. | Connect through an MCP client. Keep stdout for MCP traffic **only**; send logs to stderr. | A successful initialise/tools-list exchange. A quiet terminal before MCP messages arrive is normal; no browser URL is expected. |
