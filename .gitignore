@@ -6,3 +6,5 @@ dist/
 *.log
 .DS_Store
 ledger.json
+mcp-server/jobs/
+mcp-server/phase-work/

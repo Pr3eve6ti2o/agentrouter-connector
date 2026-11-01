@@ -1,0 +1,29 @@
+# Example systemd user unit for the AgentRouter job worker.
+# NOT installed by default. Installing/enabling a service is a separate
+# decision from building the worker. To use it, copy this file to
+# ~/.config/systemd/user/agentrouter-worker.service, set EnvironmentFile
+# to a file containing AGENTROUTER_KEY_1/AGENTROUTER_KEY_2 (never put
+# keys in this unit file itself), adjust WorkingDirectory to the
+# checked-out mcp-server directory, then:
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now agentrouter-worker
+# Restart=always covers crashes; it does not cover a VM that is replaced,
+# because the unit itself lives on that VM. The jobs directory (workspace)
+# is what survives, and the worker marks stale running jobs interrupted
+# on its next start.
+[Unit]
+Description=AgentRouter persistent job worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/workspace/agentrouter-connector/mcp-server
+EnvironmentFile=%h/workspace/.agentrouter-keys
+Environment=AGENTROUTER_JOBS_PATH=%h/workspace/agentrouter-connector/mcp-server/jobs
+ExecStart=/usr/bin/env node dist/src/worker.js
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target

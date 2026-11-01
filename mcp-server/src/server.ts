@@ -9,6 +9,7 @@ import { registerBatch } from "./tools/batch.js";
 import { registerHealth } from "./tools/health.js";
 import { registerDiagnostics } from "./tools/diagnostics.js";
 import { registerConfigGen } from "./tools/config-gen.js";
+import { registerJobs } from "./tools/jobs.js";
 import {
   combos,
   classifyUpstream,
@@ -159,5 +160,9 @@ registerBatch(server);
 registerHealth(server);
 registerDiagnostics(server, config.apiKeys);
 registerConfigGen(server);
+// Phase 4 (2026-10-31): persistent jobs. These tools never call the
+// gateway; the independent worker does. Existing agentrouter_chat is
+// untouched, including its rotation and timeout settings.
+registerJobs(server);
 
 await server.connect(new StdioServerTransport());
