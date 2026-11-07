@@ -1,0 +1,5 @@
+name: agentrouter-gateway-fix
+title: AgentRouter gateway diagnosis and streaming fix
+description: Diagnose AgentRouter gateway failures, apply the verified streaming and 32,000-token Astra fix to the local MCP server, and confirm it with a real generation.
+category: Work and knowledge
+include_in_prompt: true
