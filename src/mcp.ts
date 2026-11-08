@@ -71,7 +71,17 @@ function buildServer(): McpServer {
     const request = { ...input, model: modelCandidates[0], messages } as ChatRequest;
     const started = Date.now();
     const result = await routedChat(request, modelCandidates, input.allowFallback);
-    await appendLedger({ ts: new Date().toISOString(), requestId: randomUUID(), model: result.modelUsed, status: 200, latencyMs: Date.now() - started, usage: (result.response as any)?.usage });
+    const usage = result.response && typeof result.response === 'object'
+      ? (result.response as Record<string, unknown>).usage
+      : undefined;
+    await appendLedger({
+      ts: new Date().toISOString(),
+      requestId: randomUUID(),
+      model: result.modelUsed,
+      status: 200,
+      latencyMs: Date.now() - started,
+      usage
+    });
     return textResult({ modelUsed: result.modelUsed, attemptedModels: result.attemptedModels, response: result.response });
   });
 

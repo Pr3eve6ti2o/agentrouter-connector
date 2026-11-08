@@ -14,10 +14,19 @@ export type LedgerEvent = {
 };
 
 export function hashPrompt(payload: unknown): string {
-  return createHash('sha256').update(JSON.stringify(payload)).digest('hex');
+  const serialized = JSON.stringify(payload);
+  if (serialized === undefined) {
+    throw new TypeError('Prompt payload must be JSON-serializable.');
+  }
+  return createHash('sha256').update(serialized).digest('hex');
 }
 
 export async function appendLedger(event: LedgerEvent): Promise<void> {
-  await mkdir(dirname(config.runtime.ledgerPath), { recursive: true });
-  await appendFile(config.runtime.ledgerPath, JSON.stringify(event) + '\n', 'utf8');
+  try {
+    await mkdir(dirname(config.runtime.ledgerPath), { recursive: true });
+    await appendFile(config.runtime.ledgerPath, JSON.stringify(event) + '\n', 'utf8');
+  } catch (error) {
+    // Ledger writes are best-effort; the response may already have been sent.
+    console.error('Failed to append ledger event:', error);
+  }
 }

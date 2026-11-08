@@ -85,5 +85,5 @@ else
 fi
 unset runner_output
 
-printf 'Probe command exit status: %s\n' "$status"
+printf 'Probe child process exit status: %s\n' "$status"
 exit "$result_status"

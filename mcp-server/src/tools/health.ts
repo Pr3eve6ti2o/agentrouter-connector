@@ -1,5 +1,6 @@
 // Sol 2026-10-31 revision: both-host probes, full client headers,
 // upstream classifier kinds, and latency per combo.
+import { performance } from "node:perf_hooks";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { config } from "../config.js";
 import { hosts, classifyUpstream } from "../upstream.js";
@@ -16,7 +17,7 @@ async function health(keys: readonly string[]) {
 
   for (const host of hosts()) {
     for (const [keyIndex, key] of keys.entries()) {
-      const startedAt = Date.now();
+      const startedAt = performance.now();
 
       try {
         const response = await fetch(`https://${host}/v1/models`, {
@@ -41,7 +42,7 @@ async function health(keys: readonly string[]) {
           ok: status === 200,
           status,
           kind,
-          latencyMs: Date.now() - startedAt,
+          latencyMs: Math.round(performance.now() - startedAt),
         });
       } catch {
         results.push({
@@ -50,7 +51,7 @@ async function health(keys: readonly string[]) {
           ok: false,
           status: 0,
           kind: "upstream-transient",
-          latencyMs: Date.now() - startedAt,
+          latencyMs: Math.round(performance.now() - startedAt),
         });
       }
     }

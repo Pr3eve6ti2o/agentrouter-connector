@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from 'express';
 import { randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 import { config } from './config.js';
 import { publicError } from './errors.js';
 import { appendLedger, hashPrompt } from './ledger.js';
@@ -25,6 +26,8 @@ function auth(expected: string) {
 function requestId(req: Request): string {
   return req.get('x-request-id') || randomUUID();
 }
+
+
 
 export function createHttpApp() {
   const app = express();
@@ -63,20 +66,30 @@ export function createHttpApp() {
         return;
       }
       const stream = Boolean(body.stream);
+      const cleanMessages = config.runtime.redactPrompts ? redactMessages(body.messages) : body.messages;
       if (stream) {
-        const cleanMessages = config.runtime.redactPrompts ? redactMessages(body.messages) : body.messages;
         const { modelCandidates: _modelCandidates, allowFallback: _allowFallback, ...streamRequest } = body;
         const upstream = await agentRouterClient.chatStream({ ...streamRequest, messages: cleanMessages });
         res.status(upstream.status);
         res.setHeader('Content-Type', upstream.headers.get('content-type') || 'text/event-stream');
         res.setHeader('Cache-Control', upstream.headers.get('cache-control') || 'no-cache');
         res.setHeader('Connection', 'keep-alive');
-        if (upstream.body) Readable.fromWeb(upstream.body as any).pipe(res);
-        else res.end();
+        if (upstream.body) {
+          await pipeline(
+            Readable.fromWeb(upstream.body as Parameters<typeof Readable.fromWeb>[0]),
+            res
+          );
+        } else {
+          res.end();
+        }
+        await appendLedger({
+          ts: new Date().toISOString(), requestId: id, model: typeof body.model === 'string' ? body.model : '__unknown__',
+          status: upstream.status, latencyMs: Date.now() - started,
+          ...(config.runtime.logPrompts ? { promptHash: hashPrompt(cleanMessages) } : {})
+        });
         return;
       }
 
-      const cleanMessages = config.runtime.redactPrompts ? redactMessages(body.messages) : body.messages;
       const candidates = [
         body.model,
         ...(Array.isArray(body.modelCandidates) ? body.modelCandidates : []),
@@ -95,8 +108,12 @@ export function createHttpApp() {
       });
     } catch (error) {
       const { status, body: errBody } = publicError(error);
-      if (status >= 400 && isRetryableStatus(status)) res.setHeader('Retry-After', '2');
-      res.status(status).json(errBody);
+      if (!res.headersSent && !res.destroyed) {
+        if (status >= 400 && isRetryableStatus(status)) res.setHeader('Retry-After', '2');
+        res.status(status).json(errBody);
+      } else if (!res.destroyed && !res.writableEnded) {
+        res.destroy();
+      }
       await appendLedger({ ts: new Date().toISOString(), requestId: id, model: typeof body?.model === 'string' ? body.model : '__unknown__', status, latencyMs: Date.now() - started });
     } finally {
       release();

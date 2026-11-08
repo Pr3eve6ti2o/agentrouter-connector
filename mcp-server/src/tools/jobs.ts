@@ -15,9 +15,10 @@
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { combos } from "../upstream.js";
+import { combos, astraMaxTokens } from "../upstream.js";
 import {
   createJob, readJob, listJobs, saveJob, readOutput, readPartial,
+  type JobMessage,
 } from "../jobs.js";
 
 const messageSchema = z.object({
@@ -27,7 +28,10 @@ const messageSchema = z.object({
 
 function resolveCombo(host?: string, keyIndex?: number) {
   const all = combos();
-  if (all.length === 0) throw new Error("No host x key combos configured");
+  const first = all[0];
+  if (first === undefined) {
+    throw new Error("No host x key combos configured");
+  }
   if (host !== undefined && !all.some((c) => c.host === host)) {
     throw new Error(`Unknown host: ${host}`);
   }
@@ -37,14 +41,13 @@ function resolveCombo(host?: string, keyIndex?: number) {
   const picked = all.find(
     (c) => (host === undefined || c.host === host) &&
       (keyIndex === undefined || c.keyIndex === keyIndex),
-  ) ?? all[0]!;
+  ) ?? first;
   return picked;
 }
 
 function publicJob(job: NonNullable<Awaited<ReturnType<typeof readJob>>>) {
   // Messages are the job's own input, stored locally so the worker can
-  // resume after a reboot. They are returned here because the caller
-  // supplied them; no key material is ever in a job record.
+  // resume after a reboot. This projection returns metadata, not messages.
   return {
     id: job.id, status: job.status, model: job.model,
     host: job.host, keyIndex: job.keyIndex, attempts: job.attempts,
@@ -55,11 +58,16 @@ function publicJob(job: NonNullable<Awaited<ReturnType<typeof readJob>>>) {
   };
 }
 
-function asTool(work: (args: any) => Promise<unknown>) {
-  return async (args: any) => {
+function asTool<Args>(work: (args: Args) => Promise<unknown>) {
+  return async (args: Args) => {
     try {
       const data = await work(args);
-      return { content: [{ type: "text" as const, text: JSON.stringify(data, null, 2) }] };
+      // JSON.stringify can return undefined for unsupported top-level values.
+      const text: unknown = JSON.stringify(data, null, 2);
+      if (typeof text !== "string") {
+        throw new Error("Tool result is not JSON-serializable.");
+      }
+      return { content: [{ type: "text" as const, text }] };
     } catch (error) {
       return {
         isError: true,
@@ -73,29 +81,39 @@ function asTool(work: (args: any) => Promise<unknown>) {
 }
 
 export function registerJobs(server: McpServer): void {
+  const submitJobSchema = z.object({
+    model: z.string().min(1),
+    messages: z.array(messageSchema).min(1),
+    system: z.string().optional(),
+    max_tokens: z.number().int().positive().optional(),
+    effort: z.enum(["max"]).optional(),
+    host: z.string().optional(),
+    keyIndex: z.number().int().nonnegative().optional(),
+  });
+
   server.registerTool("agentrouter_submit_job", {
     description: "Submit a Responses-model generation as a persistent job and return its job ID immediately; the independent worker generates it. Does NOT call the gateway, so it cannot duplicate a generation. Worker supports Responses models only (not Claude).",
-    inputSchema: {
-      model: z.string().min(1),
-      messages: z.array(messageSchema).min(1),
-      system: z.string().optional(),
-      max_tokens: z.number().int().positive().optional(),
-      effort: z.enum(["max"]).optional(),
-      host: z.string().optional(),
-      keyIndex: z.number().int().nonnegative().optional(),
-    },
-  }, asTool(async ({ model, messages, system, max_tokens, effort, host, keyIndex }) => {
+    inputSchema: submitJobSchema.shape,
+  }, asTool(async (args: z.infer<typeof submitJobSchema>) => {
+    const { model, messages, system, max_tokens, host, keyIndex } = args;
+    let { effort } = args;
+    const jobMessages: JobMessage[] = messages.map((m) => ({
+      role: m.role,
+      content: m.content,
+    }));
     if (/claude/i.test(model)) {
       throw new Error("Job worker supports Responses models only; Claude models use agentrouter_chat, not jobs.");
     }
     const astra = /^gpt-6-astra$/i.test(model);
     if (astra && effort === undefined) effort = "max";
+    // 2026-11-07: cap raised 16,000 -> 32,000 (same starvation proof as
+    // config.ts: B1a2a needed 16,536 reasoning tokens).
     const tokens = max_tokens === undefined
-      ? (astra ? 16000 : 4096)
-      : (astra ? Math.min(max_tokens, 16000) : max_tokens);
+      ? (astra ? astraMaxTokens() : 4096)
+      : (astra ? Math.min(max_tokens, astraMaxTokens()) : max_tokens);
     const combo = resolveCombo(host, keyIndex);
     const job = await createJob({
-      model, messages, system, max_tokens: tokens, effort,
+      model, messages: jobMessages, system, max_tokens: tokens, effort,
       host: combo.host, keyIndex: combo.keyIndex,
     });
     return {
@@ -129,7 +147,10 @@ export function registerJobs(server: McpServer): void {
     return {
       job_id, status: job.status, error: job.error,
       partial: partial ?? "", partial_chars: partial?.length ?? 0,
-      note: "Not completed: this is saved partial text only, from before the interruption.",
+      note:
+        job.status === "interrupted"
+          ? "Not completed: this is saved partial text only, from before the interruption."
+          : "Not completed: this is saved partial text only.",
     };
   }));
 

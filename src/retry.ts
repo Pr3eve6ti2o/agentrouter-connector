@@ -12,7 +12,7 @@ export function isRetryableStatus(status: number): boolean {
 }
 
 export function isFallbackWorthyStatus(status: number): boolean {
-  return status === 404 || status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+  return status === 404 || status === 409 || isRetryableStatus(status);
 }
 
 export async function sleep(ms: number): Promise<void> {

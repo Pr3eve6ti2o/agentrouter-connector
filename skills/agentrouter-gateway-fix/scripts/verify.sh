@@ -8,7 +8,8 @@ set -euo pipefail
 #   markers, client headers, defaults and clamps. They do not exercise gateway
 #   runtime behaviour.
 # - Historical audit compares the repository's unstaged diff against HEAD
-#   with the recorded four-file snapshot when the index matches HEAD.
+#   with the 2026-11-06 repair-only snapshot (four files) when the index matches HEAD.
+#   Its checks are expected to fail on a linted tree.
 #   It is reported separately and does not affect the main verdict.
 # - Live checks run the lane's mcp-chat.mjs for tool count, server name/version
 #   and an exact probe.md response. The probe is connectivity evidence only.
@@ -153,7 +154,11 @@ check 'mcp-server/src/server.ts contains readResponsesStream' matches_all \
     '(^|[^[:alnum:]_])readResponsesStream([^[:alnum:]_]|$)' -- \
     sed -n 'p' "$REPO_ROOT/mcp-server/src/server.ts"
 
-check 'mcp-server/src/server.ts contains the recorded client headers' has_headers \
+check 'mcp-server/src/env.ts contains the recorded client headers' has_headers \
+    sed -n 'p' "$REPO_ROOT/mcp-server/src/env.ts"
+
+check 'mcp-server/src/server.ts uses the shared clientHeaders' matches_all \
+    'clientHeaders' -- \
     sed -n 'p' "$REPO_ROOT/mcp-server/src/server.ts"
 
 check 'mcp-server/src/server.ts contains the fatal incomplete-output break' matches_all \
@@ -161,8 +166,8 @@ check 'mcp-server/src/server.ts contains the fatal incomplete-output break' matc
     '(^|[^[:alnum:]_])break([^[:alnum:]_]|$)' -- \
     sed -n 'p' "$REPO_ROOT/mcp-server/src/server.ts"
 
-check 'mcp-server/src/server.ts contains the Astra clamp Math.min(max_tokens, 32_000)' matches_all \
-    'Math\.min\(max_tokens, 32_000\)' -- \
+check 'mcp-server/src/server.ts contains the Astra clamp Math.min(max_tokens, config.astraMaxTokens)' matches_all \
+    'Math\.min\(max_tokens, config\.astraMaxTokens\)' -- \
     sed -n 'p' "$REPO_ROOT/mcp-server/src/server.ts"
 
 check 'mcp-server/src/server.ts contains stream: true' matches_all \
@@ -178,14 +183,19 @@ check 'mcp-server/src/config.ts contains timeout default 1200000 and clamp value
 check 'mcp-server/src/config.ts contains Astra cap default 32000 and clamp values 1000 to 32000' has_source_roles \
     optional "$REPO_ROOT/mcp-server/src/config.ts" AGENTROUTER_ASTRA_MAX_TOKENS 32000 1000 32000
 
-check 'mcp-server/src/upstream.ts contains the recorded client headers' has_headers \
+check 'mcp-server/src/upstream.ts uses the shared clientHeaders' matches_all \
+    'clientHeaders' -- \
     sed -n 'p' "$REPO_ROOT/mcp-server/src/upstream.ts"
 
-check 'mcp-server/src/upstream.ts contains the Astra clamp Math.min(options.maxTokens, 32000)' has_source_roles \
-    upstream "$REPO_ROOT/mcp-server/src/upstream.ts" 32000
+check 'mcp-server/src/upstream.ts contains the Astra clamp Math.min(options.maxTokens, astraMaxTokens())' matches_all \
+    'Math\.min\(options\.maxTokens, astraMaxTokens\(\)\)' -- \
+    sed -n 'p' "$REPO_ROOT/mcp-server/src/upstream.ts"
 
-check 'mcp-server/src/tools/jobs.ts uses Astra default 32000 and clamp 32000, with non-Astra default 4096 and max_tokens unchanged' has_source_roles \
-    jobs "$REPO_ROOT/mcp-server/src/tools/jobs.ts" 32000 4096 32000
+check 'mcp-server/src/tools/jobs.ts uses the shared Astra ceiling for default and clamp, with non-Astra default 4096 and max_tokens unchanged for non-Astra' matches_all \
+    'astra \? astraMaxTokens\(\) : 4096' \
+    'Math\.min\(max_tokens, astraMaxTokens\(\)\)' \
+    '4096' -- \
+    sed -n 'p' "$REPO_ROOT/mcp-server/src/tools/jobs.ts"
 
 # Historical patch snapshot audit, separate from portable verification.
 AUDIT_CHECKS=0
@@ -211,24 +221,24 @@ historical_unstaged_diff() {
 }
 
 printf '%s\n' \
-    'AUDIT: Historical patch snapshot only; results do not affect the main verdict.' \
+    'AUDIT: Historical 2026-11-06 repair-only snapshot; checks are expected to fail on a linted tree; results do not affect the main verdict.' \
     'AUDIT: Baseline: unstaged diff against HEAD (requires the index to match HEAD).' \
     'AUDIT: Covers unstaged changes only; staged, committed and untracked changes are not described by it.' \
     'AUDIT: If the index differs from HEAD, the comparison is unavailable and the audit checks fail.'
 
-audit_check 'git diff --shortstat is 4 files changed, 84 insertions(+), 7 deletions(-)' output_equals \
+audit_check 'Historical 2026-11-06 repair-only snapshot (expected to fail on a linted tree): git diff --shortstat is 4 files changed, 84 insertions(+), 7 deletions(-)' output_equals \
     ' 4 files changed, 84 insertions(+), 7 deletions(-)' \
     historical_unstaged_diff --shortstat
 
-audit_check 'git diff --name-only lists exactly the four fix files and excludes mcp-server/sol-work/' output_equals \
+audit_check 'Historical 2026-11-06 repair-only snapshot (expected to fail on a linted tree): git diff --name-only lists exactly the four fix files and excludes mcp-server/sol-work/' output_equals \
     $'mcp-server/src/config.ts\nmcp-server/src/server.ts\nmcp-server/src/tools/jobs.ts\nmcp-server/src/upstream.ts' \
     historical_unstaged_diff --name-only
 
 # Live checks.
 LANE_DIR="${3:-$(dirname "$REPO_ROOT")/bawa-wallet/agent-g-android-api1}"
 
-# Part 1 ran the eleven main static checks above; audit checks are separate.
-TOTAL_CHECKS=11
+# Part 1 ran the twelve main static checks above; audit checks are separate.
+TOTAL_CHECKS=12
 
 # Keep the same reporting behaviour while counting subsequent checks.
 check() {

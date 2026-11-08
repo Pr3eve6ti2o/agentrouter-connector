@@ -11,8 +11,15 @@ export class UpstreamHttpError extends Error {
 
 export function publicError(error: unknown): { status: number; body: Record<string, unknown> } {
   if (error instanceof UpstreamHttpError) {
-    let details: unknown = error.body;
-    try { details = JSON.parse(error.body); } catch { /* text */ }
+    let details: unknown;
+    try {
+      details = JSON.parse(error.body);
+    } catch {
+      details = error.body;
+    }
+    if (typeof details === 'string') {
+      details = { message: details };
+    }
     return { status: error.status, body: { error: details } };
   }
   const message = error instanceof Error ? error.message : 'Unknown error';

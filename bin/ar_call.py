@@ -2,7 +2,7 @@
 """Authenticated AgentRouter caller for the secure-vault/Hatch runtime.
 
 This version follows the attached build record: credentials are obtained through
- dynamic_credentials as short-lived hsurr:* surrogates and are pinned to the
+dynamic_credentials as short-lived hsurr:* surrogates and are pinned to the
 AgentRouter host allowlist. The raw key is never read by this script.
 """
 from __future__ import annotations
@@ -62,7 +62,8 @@ def main() -> int:
             return 0
     except urllib.error.HTTPError as exc:
         try:
-            err = exc.read().decode("utf-8", "replace")
+            with exc:
+                err = exc.read().decode("utf-8", "replace")
         except Exception:
             err = ""
         print(json.dumps({"ok": False, "status": exc.code, "error": err[:2000]}, ensure_ascii=False))

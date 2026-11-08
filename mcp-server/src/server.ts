@@ -13,12 +13,76 @@ import { registerJobs } from "./tools/jobs.js";
 import {
   combos,
   classifyUpstream,
+  isAnthropic,
   isRetryable,
   pauseForAttempt,
   redact,
+  ANTHROPIC_TIMEOUT_MS,
+  clientHeaders,
 } from "./upstream.js";
+import { readSseEvents } from "./sse.js";
 
 const server = new McpServer({ name: "agentrouter", version: "1.0.0" });
+
+// 2026-11-07: streamed Responses assembly. The gateway kills an idle
+// non-streamed connection after ~291s while the model is still reasoning
+// (no bytes flow until reasoning finishes), and a 16,000-token cap starves
+// max-reasoning calls to zero text (B1a2a needed 16,536 reasoning tokens).
+// Streaming keeps bytes flowing through the whole reasoning window, and the
+// 32,000 cap gives the model room to finish thinking and then write.
+// Only status "completed" counts as success: a stream that ends early, or
+// ends incomplete, must never be saved as a landed section.
+// SSE framing and reader cleanup are shared; response integrity checks stay here.
+async function readResponsesStream(response: Response): Promise<unknown> {
+  if (!response.body) throw new Error("AgentRouter /responses: empty stream");
+  let accumulated = "";
+  let finalResponse: any = null;
+  let finalStatus: string | null = null;
+  let sawMalformedLine = false;
+
+  for await (const event of readSseEvents(response)) {
+    if (event.kind === "malformed") {
+      sawMalformedLine = true;
+      continue;
+    }
+
+    const eventName = event.eventName;
+    try {
+      // Retain the original JSON.parse payload handling, including null/primitives.
+      const data: any = event.data;
+      if (eventName === "response.output_text.delta" && typeof data?.delta === "string") {
+        accumulated += data.delta;
+      } else if (eventName === "response.completed" || eventName === "response.failed" || eventName === "response.incomplete") {
+        finalResponse = data.response ?? data;
+        finalStatus = data.response?.status ?? eventName.replace(/^response\./, "");
+      }
+    } catch {
+      // Keep reading; integrity is checked before returning a completed result.
+      sawMalformedLine = true;
+    }
+  }
+
+  if (finalStatus === "completed" && finalResponse) {
+    const finalText =
+      typeof finalResponse.output_text === "string" && finalResponse.output_text.length > 0
+        ? finalResponse.output_text
+        : null;
+
+    if (finalText !== null && finalText !== accumulated) {
+      throw new Error("AgentRouter /responses: stream integrity failure (final output_text differs from accumulated text)");
+    }
+    if (finalText === null && sawMalformedLine) {
+      throw new Error("AgentRouter /responses: stream integrity failure (malformed SSE data without authoritative final output_text)");
+    }
+
+    return { ...finalResponse, output_text: finalText ?? accumulated };
+  }
+  if (finalStatus) {
+    const reason = finalResponse?.incomplete_details?.reason ?? finalResponse?.error?.code ?? "";
+    throw new Error(`AgentRouter /responses gateway status: ${finalStatus}${reason ? ` (${reason})` : ""}`);
+  }
+  throw new Error("AgentRouter /responses: stream ended without a completed response");
+}
 
 async function request(
   path: "/models" | "/responses" | "/messages",
@@ -32,8 +96,14 @@ async function request(
 
   const rounds = Math.max(1, config.retryRounds);
   const totalAttempts = rounds * combinations.length;
-  const timeoutMs = path === "/messages" ? 120_000 : config.timeoutMs;
+  const timeoutMs = path === "/messages" ? ANTHROPIC_TIMEOUT_MS : config.timeoutMs;
   const serializedBody = body === undefined ? undefined : JSON.stringify(body);
+  const streamed =
+    path === "/responses" &&
+    typeof body === "object" &&
+    body !== null &&
+    "stream" in body &&
+    body.stream === true;
   let lastStatus: number | null = null;
   let lastBody = "";
   let lastKind = "upstream-transient";
@@ -51,21 +121,24 @@ async function request(
           method: body === undefined ? "GET" : "POST",
           headers: {
             Authorization: `Bearer ${key}`,
-            Originator: "codex_cli_rs",
-            Version: "0.101.0",
             // [glue] User-Agent from the measured codex_cli_rs header set (S-03).
-            "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-            "Content-Type": "application/json",
+            ...clientHeaders,
             ...(path === "/messages" ? { "anthropic-version": "2023-06-01" } : {}),
+            ...(streamed ? { Accept: "text/event-stream" } : {}),
           },
           body: serializedBody,
           signal: AbortSignal.timeout(timeoutMs),
         });
+        if (streamed && response.ok) return await readResponsesStream(response);
         raw = await response.text();
       } catch (error) {
         lastStatus = null;
         lastBody = error instanceof Error ? error.message : String(error);
         lastKind = "upstream-transient";
+        // Retrying a max_output_tokens starvation cannot help: the same
+        // prompt burns the same cap on every combo. Stop instead of
+        // burning 12 attempts x 32k tokens.
+        if (/gateway status: incomplete \(max_output_tokens\)/.test(lastBody)) break attempts;
         if (attemptIndex < totalAttempts - 1) {
           await pauseForAttempt(attemptIndex);
         }
@@ -141,15 +214,17 @@ server.registerTool("agentrouter_chat", {
   if (max_tokens === undefined) {
     max_tokens = astra ? config.astraMaxTokens : 4096;
   } else if (astra) {
-    max_tokens = Math.min(max_tokens, 16_000);
+    // 2026-11-07: cap raised 16,000 -> 32,000 (starvation proof in
+    // config.ts). Responses streams so the ~291s idle cut cannot fire.
+    max_tokens = Math.min(max_tokens, config.astraMaxTokens);
   }
 
-  const anthropic = /claude/i.test(model);
+  const anthropic = isAnthropic(model);
   const body = anthropic
     ? { model, messages, system, max_tokens, stream: false }
     : {
         model, input: messages, instructions: system,
-        max_output_tokens: max_tokens, store: false, stream: false,
+        max_output_tokens: max_tokens, store: false, stream: true,
         ...(effort === undefined ? {} : { reasoning: { effort } }),
       };
   return asTool(() => request(anthropic ? "/messages" : "/responses", body));

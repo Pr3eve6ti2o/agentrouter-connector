@@ -5,7 +5,7 @@
 ![Node.js](https://img.shields.io/badge/node-%3E%3D22-brightgreen)
 ![MCP](https://img.shields.io/badge/MCP-stdio%20%2B%20HTTP-purple)
 
-AgentRouter Connector contains two components: the original v2 HTTP connector at the repository root and a new stdio MCP server in [`mcp-server/`](mcp-server/).
+AgentRouter Connector contains two deliberately separate stacks: the root HTTP connector (`src/`, `express`, MCP handler v2.0.0, single-key defaulting configuration, no import-time throw) and the stdio MCP server in [`mcp-server/`](mcp-server/) (12 tools, validated 14-variable configuration, keys-only worker bootstrap). Neither stack imports implementation modules from the other; configuration belongs to the consuming runtime.
 
 ![What this repository takes care of](mcp-server/assets/repo-map.svg)
 
@@ -68,7 +68,7 @@ The stdio MCP server is in [`mcp-server/`](mcp-server/). It is a local Node.js p
 | Tool | Description |
 | --- | --- |
 | `agentrouter_list_models` | Returns the gateway's live model list. |
-| `agentrouter_chat` | Makes a single call with a model and a prompt. Astra defaults to 12,000 output tokens, overridable to 16,000. |
+| `agentrouter_chat` | Makes a single call with a model and a prompt. Astra uses `config.astraMaxTokens` (default 32,000 output tokens, clamped to 1,000–32,000); `max_tokens` defaults to this value and is capped with `Math.min(max_tokens, config.astraMaxTokens)`. |
 | `agentrouter_batch_chat` | Runs calls in order, at most 32 per batch. Concurrency defaults to 1 (sequential) for Astra, otherwise 8. Every task retries through the same host × key rotation, and each result carries index, attempts, host, key index and classified kind, so only failed tasks need re-submitting. |
 | `agentrouter_health` | Checks per host × key status via `GET /v1/models`, with no spend. |
 | `agentrouter_diagnose` | Probes host × key × model combinations, classifies errors (including `upstream-transient`, `pool-quota-403` and `upstream-state-mismatch`) and reports per-combo success rates from the ledger. |
@@ -84,7 +84,7 @@ The stdio MCP server is in [`mcp-server/`](mcp-server/). It is a local Node.js p
    npm install
    ```
 
-3. Set the 14 required environment variables (2 keys + 12 per-model limits, see `mcp-server/.env.example`). Four optional MCP v2 variables have defaults and are not required: `AGENTROUTER_HOSTS` (default `agentrouter.org,ps.air-outer.com`), `AGENTROUTER_RETRY_ROUNDS` (default `3`), `AGENTROUTER_TIMEOUT_MS` (default `600000`), `AGENTROUTER_ASTRA_MAX_TOKENS` (default `12000`).
+3. Set the 14 required environment variables (2 keys + 12 per-model limits, see `mcp-server/.env.example`). Four optional MCP v2 variables have defaults and are not required: `AGENTROUTER_HOSTS` (default `agentrouter.org,ps.air-outer.com`), `AGENTROUTER_RETRY_ROUNDS` (default `3`, clamped to `1`–`10`), `AGENTROUTER_TIMEOUT_MS` (default `1200000` ms, or 20 minutes; clamped to `10000`–`1800000` ms), `AGENTROUTER_ASTRA_MAX_TOKENS` (default `32000`, clamped to `1000`–`32000`). `AGENTROUTER_LEDGER_PATH` is also optional; when unset, the ledger is `ledger.jsonl` in the server working directory.
 4. Build the server:
 
    ```sh
@@ -149,6 +149,8 @@ See [`mcp-server/README.md`](mcp-server/README.md) for full setup details, inclu
 ## Repository layout
 
 - `src/`, `bin/`, `Dockerfile`, `docker-compose.yml` — the original v2 HTTP connector (the gateway). Its own docs are in `docs/PROCESS.md` and `docs/CONNECT_TO_CHAT.md`.
-- `mcp-server/` — the stdio MCP server: `README.md` (setup and usage), `SPEC.md` (the design), `BUILD-REPORT.md` (build and glue log), `assets/` (diagrams used by the READMEs).
+- `mcp-server/` — the stdio MCP server: `README.md` (setup and usage), `SPEC.md` (the design), `BUILD-REPORT.md` (build and glue log), `assets/` (diagrams used by the READMEs). The server builds under strict TypeScript.
+  - `mcp-server/src/worker.ts` — the separate file-job worker, run as `node dist/src/worker.js` after building and bootstrapped with only the two keys set.
+- `skills/agentrouter-gateway-fix/` — the AgentRouter gateway-fix skill.
 - `docs/MCP-SERVER.md` — troubleshooting and operations for the stdio MCP server.
 - `.github/workflows/ci.yml` — CI for the root connector: `npm install`, `npm run check`, `npm test`, `npm run build` on push and pull request. It does not build the MCP server; build that separately with `npm run build` in `mcp-server/`.

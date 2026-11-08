@@ -3,22 +3,9 @@
 // `export`; Astra's recovered tail (R-08btail) now completes it — see the [join]
 // note at the end of this file.
 
-/* package.json (save this file as config.ts)
-{
-  "name": "agentrouter-mcp-config",
-  "version": "1.0.0",
-  "private": true,
-  "type": "module",
-  "main": "./dist/config.js",
-  "types": "./dist/config.d.ts",
-  "engines": { "node": ">=20" },
-  "scripts": {
-    "build": "tsc --strict --target ES2022 --module NodeNext --declaration --outDir dist config.ts"
-  },
-  "devDependencies": { "@types/node": "^22.0.0", "typescript": "^5.7.0" }
-}
-*/
+// Built with mcp-server/tsconfig.json: strict is true and declarations are not emitted.
 import { env } from "node:process";
+import { parseApiKeys, parseHosts } from "./env.js";
 
 export const caps = Object.freeze({
   maxConcurrency: 8,
@@ -37,11 +24,18 @@ export function loadConfig(source: NodeJS.ProcessEnv = env) {
     return value;
   };
 
-  const optional = <T>(
+    const optional = <T>(
     name: string, fallback: T, parse: (value: string) => T | undefined
   ): T => {
-    const value = source[name]?.trim();
-    return value ? parse(value) ?? fallback : fallback;
+    const raw = source[name];
+    const value = raw?.trim();
+    const parsed = value ? parse(value) : undefined;
+    if (raw !== undefined && (parsed === undefined || parsed === null)) {
+      console.error(
+        `Warning: ${name} is set but invalid; using fallback:`, fallback
+      );
+    }
+    return parsed ?? fallback;
   };
 
   const clampedInteger = (min: number, max: number) =>
@@ -53,10 +47,7 @@ export function loadConfig(source: NodeJS.ProcessEnv = env) {
         : undefined;
     };
 
-  const apiKeys = [...new Set(
-    [source.AGENTROUTER_KEY_1, source.AGENTROUTER_KEY_2]
-      .map(key => key?.trim()).filter((key): key is string => !!key)
-  )];
+  const apiKeys = parseApiKeys(source);
   if (!apiKeys.length)
     throw new Error("Set AGENTROUTER_KEY_1 and/or AGENTROUTER_KEY_2");
 
@@ -85,31 +76,29 @@ export function loadConfig(source: NodeJS.ProcessEnv = env) {
   const hosts = optional<string[]>(
     "AGENTROUTER_HOSTS",
     ["agentrouter.org", "ps.air-outer.com"],
-    raw => {
-      const parsed = [...new Set(
-        raw.split(",").map(host => host.trim()).filter(host => !!host)
-      )];
-      const hostname = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*\.?$/i;
-      return parsed.length && parsed.every(host =>
-        host.length <= (host.endsWith(".") ? 254 : 253) && hostname.test(host)
-      )
-        ? parsed
-        : undefined;
-    }
+    () => parseHosts(source)
   );
   const retryRounds = optional(
     "AGENTROUTER_RETRY_ROUNDS", 3, clampedInteger(1, 10)
   );
+  // 2026-11-07: raised after the gateway error was diagnosed. A streamed
+  // max-reasoning generation can legitimately run ~15 min (32k tokens at
+  // ~37 tok/s), so the per-attempt timeout default is 20 min, cap 30 min.
+  // The Astra output cap is 32,000: B1a2a provably needed 16,536 reasoning
+  // tokens, more than the old 16,000 cap, and starved with zero text.
   const timeoutMs = optional(
-    "AGENTROUTER_TIMEOUT_MS", 600000, clampedInteger(10000, 600000)
+    "AGENTROUTER_TIMEOUT_MS", 1200000, clampedInteger(10000, 1800000)
   );
   const astraMaxTokens = optional(
-    "AGENTROUTER_ASTRA_MAX_TOKENS", 12000, clampedInteger(1000, 16000)
+    "AGENTROUTER_ASTRA_MAX_TOKENS", 32000, clampedInteger(1000, 32000)
+  );
+  const ledgerPath = optional<string | undefined>(
+    "AGENTROUTER_LEDGER_PATH", undefined, (value) => value
   );
 
   return Object.freeze({
     apiKeys: Object.freeze(apiKeys), models, caps,
-    hosts, retryRounds, timeoutMs, astraMaxTokens,
+    hosts, retryRounds, timeoutMs, astraMaxTokens, ledgerPath,
   });
 }
 
@@ -117,6 +106,5 @@ export function loadConfig(source: NodeJS.ProcessEnv = env) {
 export const config = loadConfig();
 export const MODELS = config.models;
 export type ModelId = keyof typeof MODELS;
-export
-type Config = ReturnType<typeof loadConfig>;
+export type Config = ReturnType<typeof loadConfig>;
 // [join: the line above is Astra's recovered tail (R-08btail, 2026-10-23, API 1, 1 attempt) completing the truncated final export.]

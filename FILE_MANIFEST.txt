@@ -2,19 +2,74 @@ agentrouter-connector/
 ├── README.md
 ├── VERIFICATION.md
 ├── FILE_MANIFEST.txt
-├── LICENSE
 ├── package.json
+├── package-lock.json
 ├── tsconfig.json
 ├── .env.example
 ├── .gitignore
 ├── .dockerignore
 ├── Dockerfile
 ├── docker-compose.yml
+├── mcp-server/
+│   ├── .env.example
+│   ├── .gitignore
+│   ├── BUILD-REPORT.md
+│   ├── FILE-TREE.txt
+│   ├── README.md
+│   ├── SPEC.md
+│   ├── assets/
+│   │   ├── repo-map.svg
+│   │   └── request-flow.svg
+│   ├── config-schema.json
+│   ├── package-lock.json
+│   ├── package.json
+│   ├── smoke-test.ts
+│   ├── src/
+│   │   ├── config.ts
+│   │   ├── env.ts
+│   │   ├── jobs.ts
+│   │   ├── server.ts
+│   │   ├── sse.ts
+│   │   ├── tools/
+│   │   │   ├── batch.ts
+│   │   │   ├── config-gen.ts
+│   │   │   ├── diagnostics.ts
+│   │   │   ├── health.ts
+│   │   │   └── jobs.ts
+│   │   ├── upstream.ts
+│   │   └── worker.ts
+│   ├── test-client.mjs
+│   ├── tsconfig.json
+│   └── worker/
+│       ├── README.md
+│       ├── agentrouter-worker.service
+│       └── guard.sh
 ├── bin/
 │   ├── ar_call.py
 │   └── delegate.py
 ├── skill/
 │   └── SKILL.md
+├── skills/
+│   └── agentrouter-gateway-fix/
+│       ├── SKILL.md
+│       ├── examples/
+│       │   ├── probe-output.md
+│       │   └── receipt-b1a2a.md
+│       ├── references/
+│       │   ├── config.md
+│       │   ├── connector.md
+│       │   ├── errors.md
+│       │   ├── fix.md
+│       │   ├── prompt-sizing.md
+│       │   ├── repo-map.md
+│       │   └── verification.md
+│       ├── scripts/
+│       │   ├── check-loading.mjs
+│       │   ├── diagnose.py
+│       │   ├── list-tools.sh
+│       │   ├── probe.sh
+│       │   └── verify.sh
+│       └── skill.yaml
 ├── src/
 │   ├── index.ts
 │   ├── server.ts
@@ -35,9 +90,11 @@ agentrouter-connector/
 │   ├── unit.test.ts
 │   └── url.test.ts
 ├── docs/
-│   ├── PROCESS.md
 │   ├── CONNECT_TO_CHAT.md
-│   └── mcp-client.example.json
+│   ├── MCP-SERVER.md
+│   ├── PROCESS.md
+│   ├── mcp-client.example.json
+│   └── protocol-design-example.md
 └── .github/
     └── workflows/
         └── ci.yml

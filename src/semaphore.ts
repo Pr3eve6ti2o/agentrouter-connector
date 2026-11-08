@@ -2,7 +2,7 @@ export class Semaphore {
   private available: number;
   private waiters: Array<() => void> = [];
 
-  constructor(private readonly capacity: number) {
+  constructor(capacity: number) {
     if (!Number.isInteger(capacity) || capacity < 1) throw new Error('Semaphore capacity must be >= 1');
     this.available = capacity;
   }
@@ -13,7 +13,6 @@ export class Semaphore {
       return this.release.bind(this);
     }
     await new Promise<void>((resolve) => this.waiters.push(resolve));
-    this.available--;
     return this.release.bind(this);
   }
 

@@ -18,7 +18,7 @@ Then register the server in Codex and/or Claude Code (guide §9) and restart the
 - Routing your prompt to AgentRouter and rotating host × key combos until a transient failure clears or the retry budget (default 3 rounds = 12 attempts) runs out.
 - Classifying failures by status *and* body, so a 401 header rejection, a 402/403 quota problem, a 503 off-list model, a 502/disconnect lottery failure, and a chained-state mismatch are never confused with each other.
 - Recording every attempt in a local ledger (`ledger.jsonl` by default) with host, key index, kind, attempts and latency — never a key value — and reporting per-combo success rates in `agentrouter_diagnose`.
-- Applying safe Astra defaults: 12,000 output tokens (overridable to 16,000), sequential batches, and rejecting `low` effort for Astra.
+- Applying safe Astra defaults: 32,000 output tokens from the shared `config.astraMaxTokens` cap (clamped to 1,000–32,000), request `max_tokens` capped with `Math.min(max_tokens, config.astraMaxTokens)`, and sequential batches by default.
 - It does **not** provision accounts, grant quota, make a model available, fix the gateway, or protect a chained Codex session (see "What this upgrade does not do" below).
 
 ![Request flow](../mcp-server/assets/request-flow.svg)
@@ -33,8 +33,8 @@ These four new optional variables have defaults and do not affect the 14-var con
 | --- | --- |
 | `AGENTROUTER_HOSTS` | `agentrouter.org,ps.air-outer.com` |
 | `AGENTROUTER_RETRY_ROUNDS` | `3` |
-| `AGENTROUTER_TIMEOUT_MS` | `600000` |
-| `AGENTROUTER_ASTRA_MAX_TOKENS` | `12000` |
+| `AGENTROUTER_TIMEOUT_MS` | `1200000` |
+| `AGENTROUTER_ASTRA_MAX_TOKENS` | `32000` |
 
 A server started with only the original 14 vars keeps working unchanged.
 
@@ -89,8 +89,7 @@ between attempts.
 - Retryable: **401, 402, 403, 429, 502, 503, 504**, plus transport
   failures (fetch throw, connection closed without response, timeout).
 - Non-retryable: **400, 404**, and all remaining 4xx; stop immediately.
-- Timeouts: Responses defaults to **600 s** (`AGENTROUTER_TIMEOUT_MS`);
-  Anthropic `/messages` defaults to **120 s** unless overridden.
+- Timeouts: Responses defaults to **1200 s** (`AGENTROUTER_TIMEOUT_MS`); Anthropic `/messages` uses the fixed **120 s** `ANTHROPIC_TIMEOUT_MS` constant in `upstream.ts`.
 - Client headers always use `Originator: codex_cli_rs`,
   `Version: 0.101.0`, and a matching `User-Agent`.
 
@@ -101,8 +100,10 @@ through the same rotation. A transient 502 or disconnect no longer
 fails a task immediately.
 
 - Concurrency defaults to **1** when any task uses `gpt-6-astra`,
-  otherwise **8**; callers may override to **1–8**.
-- At most **32 tasks** per batch; results stay in input order.
+  otherwise **8** (`caps.maxConcurrency`, read from configuration);
+  callers may override to **1–8**, clamped to `caps.maxConcurrency`.
+- At most **32 tasks** per batch, using `caps.maxBatchTasks` from
+  configuration.
 
 Each result carries `index`, `ok`, `value` (success) or `error` (failure),
 `attempts`, `host`, and `keyIndex`, plus `kind` on failures.
@@ -110,8 +111,9 @@ Callers can re-submit only failed tasks by `index`.
 
 ## Chat caps and effort
 
-For `agentrouter_chat`, `gpt-6-astra` defaults to **12000** tokens
-(`AGENTROUTER_ASTRA_MAX_TOKENS`); callers may override up to **16000**.
+For `agentrouter_chat`, `gpt-6-astra` defaults to **32000** tokens
+(`AGENTROUTER_ASTRA_MAX_TOKENS`); callers may override up to
+`config.astraMaxTokens`, with an absolute ceiling of **32000**.
 Other models retain their defaults: **4096** for chat and **3200**
 for non-Astra batch tasks.
 
@@ -134,6 +136,30 @@ error kind, attempts used, latency per combo, and reasoning/text tokens
 from the usage receipt.
 
 Ledger path: `AGENTROUTER_LEDGER_PATH`, or `ledger.jsonl` by default.
+
+## Worker and file jobs
+
+The server runs file jobs in a separate worker process
+(`node dist/src/worker.js`). The worker boots with only the two keys set.
+
+- **Worker liveness:** The worker ensures the `jobs` directory exists
+  before writing `jobs/worker.pid` on startup, and removes the PID file
+  on graceful shutdown. The launcher guard (`mcp-server/worker/guard.sh`)
+  checks the PID with `kill -0`, verifies a working-directory match and
+  checks the command line for `dist/src/worker.js`. If the PID file is
+  stale, the guard removes it and relaunches the worker.
+- **Claims and recovery:** Jobs use atomic claims through exclusive
+  creation, with a 120-second stale break. `readJob` merges the heartbeat
+  sidecar. At startup, running jobs whose heartbeat is older than
+  120 seconds are marked `interrupted` by default. These jobs are
+  re-queued only when `AGENTROUTER_JOB_AUTO_RESUBMIT=1`; enable this
+  setting only when automatic re-queuing is wanted.
+
+Known remaining duplication: `tools/health.ts` carries inline
+`Originator`, `Version` and `User-Agent` literals, a third copy of the
+client headers. Shared `clientHeaders` live in `mcp-server/src/env.ts`.
+The health GET probe sends no `Content-Type`; sharing the headers would
+add one, and that behaviour decision remains open.
 
 ## What this upgrade does not do
 

@@ -2,7 +2,7 @@
 // wired one (Astra S-10b); registerConfigGen() at the end of this file exposes
 // it as the agentrouter_generate_config tool (S-01's `generate_config`).
 // The duplicate src/config-gen.ts was renamed to src/config-gen.ts.unused.
-import { mkdir, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, open, rename, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -42,13 +42,46 @@ env_key = "CODEX_GATEWAY_API_KEY"
   async function writeConfig(file: string, text: string): Promise<void> {
     await mkdir(dirname(file), { recursive: true, mode: 0o700 });
     const temp = `${file}.${randomUUID()}.tmp`;
+
+    // Start cleanup only after exclusive creation succeeds.
+    const handle = await open(temp, "wx", 0o600);
+    let closeAttempted = false;
+
     try {
-      await writeFile(temp, text, {
-        encoding: "utf8", mode: 0o600, flag: "wx",
-      });
+      await handle.writeFile(text, "utf8");
+      closeAttempted = true;
+      await handle.close();
       await rename(temp, file);
-    } finally {
-      await rm(temp, { force: true });
+    } catch (error) {
+      const errors: unknown[] = [error];
+
+      if (!closeAttempted) {
+        try {
+          await handle.close();
+        } catch (closeError) {
+          errors.push(closeError);
+        }
+      }
+
+      try {
+        await rm(temp, { force: true });
+      } catch (cleanupError) {
+        errors.push(cleanupError);
+      }
+
+      if (errors.length > 1) {
+        const details = errors
+          .map((cause) =>
+            cause instanceof Error ? cause.message : String(cause),
+          )
+          .join("; ");
+        throw new AggregateError(
+          errors,
+          `Failed to write config "${file}": ${details}`,
+        );
+      }
+
+      throw error;
     }
   }
 
@@ -77,10 +110,12 @@ export function registerConfigGen(server: McpServer): void {
       } catch (error) {
         return {
           isError: true,
-          content: [{
-            type: "text" as const,
-            text: error instanceof Error ? error.message : String(error),
-          }],
+          content: [
+            {
+              type: "text" as const,
+              text: error instanceof Error ? error.message : String(error),
+            },
+          ],
         };
       }
     },

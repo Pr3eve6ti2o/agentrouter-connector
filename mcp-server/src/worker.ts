@@ -6,8 +6,9 @@
 // its own: job state lives in the workspace jobs directory (which does
 // survive), and a guard (worker/guard.sh, or a systemd unit) must
 // relaunch it after a reboot. On startup it marks stale running jobs
-// (heartbeat older than 120 s) as interrupted; it never silently
-// regenerates them — an interrupted job needs agentrouter_resume_job.
+// (heartbeat older than 120 s) as interrupted by default; an
+// interrupted job needs agentrouter_resume_job. Explicitly setting
+// AGENTROUTER_JOB_AUTO_RESUBMIT=1 re-queues stale running jobs instead.
 //
 // Per job, the worker makes ONE gateway call through the EXACT host x
 // key combination recorded at submit time, using SSE (stream: true,
@@ -23,40 +24,40 @@
 // server's 600,000 ms per-attempt timeout that made any Astra
 // generation longer than 10 minutes impossible through agentrouter_chat.
 
-import { readFile } from "node:fs/promises";
+import { readFile, unlink, writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import {
   listJobs, readJob, saveJob, appendPartial, archivePartial,
-  saveOutput, saveResultJson, type Job,
+  saveOutput, saveResultJson, claimJob, releaseClaim, touchHeartbeat,
+  ensureJobsDir, jobsDir, type Job,
 } from "./jobs.js";
+import { readSseEvents } from "./sse.js";
+import { parseApiKeys, parseHosts, clientHeaders } from "./env.js";
 
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
-function envKeys(): string[] {
-  return [...new Set(
-    [process.env.AGENTROUTER_KEY_1, process.env.AGENTROUTER_KEY_2]
-      .map((k) => k?.trim()).filter((k): k is string => !!k),
-  )];
-}
-function envHosts(): string[] {
-  const raw = process.env.AGENTROUTER_HOSTS?.trim();
-  if (!raw) return ["agentrouter.org", "ps.air-outer.com"];
-  const hosts = [...new Set(raw.split(",").map((h) => h.trim()).filter(Boolean))];
-  return hosts.length ? hosts : ["agentrouter.org", "ps.air-outer.com"];
-}
+
 function workerTimeoutMs(): number {
   const raw = Number(process.env.AGENTROUTER_WORKER_TIMEOUT_MS);
-  return Number.isSafeInteger(raw) && raw >= 60_000 ? raw : 3_600_000;
+  // Node.js converts setTimeout delays greater than 2^31 - 1 ms to 1 ms;
+  // bound the configured value the same way as pollMs().
+  return Number.isSafeInteger(raw) && raw >= 60_000 && raw <= 2_147_483_647
+    ? raw
+    : 3_600_000;
 }
 function pollMs(): number {
   const raw = Number(process.env.AGENTROUTER_WORKER_POLL_MS);
-  return Number.isSafeInteger(raw) && raw >= 1000 ? raw : 10_000;
+  // Node.js converts delays greater than 2^31 - 1 ms to 1 ms.
+  return Number.isSafeInteger(raw) && raw >= 1_000 && raw <= 2_147_483_647
+    ? raw
+    : 10_000;
 }
 function autoResubmit(): boolean {
   return process.env.AGENTROUTER_JOB_AUTO_RESUBMIT === "1";
 }
 
-const KEYS = envKeys();
-const HOSTS = envHosts();
+const KEYS = parseApiKeys(process.env);
+const HOSTS = parseHosts(process.env) ?? ["agentrouter.org", "ps.air-outer.com"];
 if (!KEYS.length) {
   console.error("worker: set AGENTROUTER_KEY_1 and/or AGENTROUTER_KEY_2");
   process.exit(2);
@@ -69,17 +70,6 @@ process.on("SIGINT", () => { shuttingDown = true; });
 function log(...args: unknown[]): void {
   console.log(`[worker ${new Date().toISOString()}]`, ...args);
 }
-
-function extractOutputText(value: unknown): string {
-  const v = value as any;
-  if (typeof v?.output_text === "string" && v.output_text) return v.output_text;
-  let out = "";
-  for (const item of v?.output ?? []) {
-    for (const c of item?.content ?? []) if (typeof c?.text === "string") out += c.text;
-  }
-  return out;
-}
-
 async function runJob(job: Job): Promise<void> {
   const key = KEYS[job.keyIndex];
   if (key === undefined) {
@@ -108,19 +98,20 @@ async function runJob(job: Job): Promise<void> {
 
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), workerTimeoutMs());
-  const heartbeat = setInterval(async () => {
-    const current = await readJob(job.id);
-    if (!current) return;
-    if (current.status === "cancelled") {
-      controller.abort();
-      return;
-    }
-    current.last_heartbeat = new Date().toISOString();
-    await saveJob(current);
+  const heartbeat = setInterval(() => {
+    touchHeartbeat(job.id).catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`job=${job.id} heartbeat failed: ${message}`);
+    });
   }, 30_000);
-  const cancelWatch = setInterval(async () => {
-    const current = await readJob(job.id);
-    if (current?.status === "cancelled") controller.abort();
+  const cancelWatch = setInterval(() => {
+    (async () => {
+      const current = await readJob(job.id);
+      if (current?.status === "cancelled") controller.abort();
+    })().catch((error: unknown) => {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`job=${job.id} cancellation check failed: ${message}`);
+    });
   }, 5_000);
 
   const body = {
@@ -143,10 +134,7 @@ async function runJob(job: Job): Promise<void> {
       method: "POST",
       headers: {
         Authorization: `Bearer ${key}`,
-        Originator: "codex_cli_rs",
-        Version: "0.101.0",
-        "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-        "Content-Type": "application/json",
+        ...clientHeaders,
         Accept: "text/event-stream",
       },
       body: JSON.stringify(body),
@@ -171,56 +159,56 @@ async function runJob(job: Job): Promise<void> {
       return;
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    let done = false;
-    while (!done) {
-      const { value, done: streamDone } = await reader.read();
-      if (value) {
-        buffer += decoder.decode(value, { stream: true });
-        let sep = buffer.indexOf("\n\n");
-        while (sep >= 0) {
-          const block = buffer.slice(0, sep);
-          buffer = buffer.slice(sep + 2);
-          let eventName = "";
-          const dataLines: string[] = [];
-          for (const line of block.split("\n")) {
-            if (line.startsWith("event:")) eventName = line.slice(6).trim();
-            else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-          }
-          const dataText = dataLines.join("\n");
-          if (dataText && dataText !== "[DONE]") {
-            try {
-              const data = JSON.parse(dataText);
-              if (typeof data?.response?.id === "string" && !job.response_id) {
-                job.response_id = data.response.id;
-                const cur = await readJob(job.id);
-                if (cur) { cur.response_id = job.response_id; await saveJob(cur); }
-              }
-              if (eventName === "response.output_text.delta" && typeof data?.delta === "string" && data.delta) {
-                accumulated += data.delta;
-                await appendPartial(job.id, data.delta);
-              } else if (eventName === "response.output_text.done" && typeof data?.text === "string") {
-                finalText = data.text;
-              } else if (eventName === "response.completed") {
-                completedValue = data.response ?? data;
-                completedStatus = (data.response as any)?.status ?? "completed";
-                if (typeof (data.response as any)?.output_text === "string") {
-                  finalText = (data.response as any).output_text;
-                }
-              } else if (eventName === "response.failed" || eventName === "response.incomplete") {
-                completedValue = data.response ?? data;
-                completedStatus = (data.response as any)?.status ?? eventName;
-              }
-            } catch {
-              // Ignore a single malformed SSE data line; the stream continues.
+    const isSseRecord = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null;
+
+    for await (const event of readSseEvents(response)) {
+      if (event.kind === "data") {
+        const { eventName, data } = event;
+        if (data !== null && data !== undefined) {
+          const eventData = isSseRecord(data) ? data : undefined;
+          const responseValue = eventData?.response;
+          const response = isSseRecord(responseValue) ? responseValue : undefined;
+          const responseId = response?.id;
+          const responseStatus = response?.status;
+
+          if (typeof responseId === "string" && !job.response_id) {
+            job.response_id = responseId;
+            const cur = await readJob(job.id);
+            if (cur) {
+              cur.response_id = job.response_id;
+              await saveJob(cur);
             }
           }
-          sep = buffer.indexOf("\n\n");
+          if (
+            eventName === "response.output_text.delta" &&
+            typeof eventData?.delta === "string" &&
+            eventData.delta
+          ) {
+            accumulated += eventData.delta;
+            await appendPartial(job.id, eventData.delta);
+          } else if (
+            eventName === "response.output_text.done" &&
+            typeof eventData?.text === "string"
+          ) {
+            finalText = eventData.text;
+          } else if (eventName === "response.completed") {
+            completedValue = responseValue ?? data;
+            completedStatus =
+              typeof responseStatus === "string" ? responseStatus : "completed";
+            if (typeof response?.output_text === "string") {
+              finalText = response.output_text;
+            }
+          } else if (
+            eventName === "response.failed" ||
+            eventName === "response.incomplete"
+          ) {
+            completedValue = responseValue ?? data;
+            completedStatus =
+              typeof responseStatus === "string" ? responseStatus : eventName;
+          }
         }
       }
-      if (streamDone) done = true;
       if (shuttingDown) controller.abort();
     }
 
@@ -284,9 +272,14 @@ async function runJob(job: Job): Promise<void> {
     clearTimeout(timeout);
     clearInterval(heartbeat);
     clearInterval(cancelWatch);
+    try {
+      await releaseClaim(job.id);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      log(`job=${job.id} claim release failed: ${message}`);
+    }
   }
 }
-
 async function startupRecovery(): Promise<void> {
   const jobs = await listJobs();
   const now = Date.now();
@@ -307,22 +300,47 @@ async function startupRecovery(): Promise<void> {
       log(`startup: stale running job=${job.id} marked interrupted (auto-resubmit off)`);
     }
     await saveJob(job);
+    await releaseClaim(job.id);
   }
 }
 
 async function main(): Promise<void> {
   log(`starting pid=${process.pid} hosts=${HOSTS.join(",")} keys=${KEYS.length} timeout_ms=${workerTimeoutMs()} poll_ms=${pollMs()} auto_resubmit=${autoResubmit()}`);
+  await ensureJobsDir();
+  await writeFile(join(jobsDir(), "worker.pid"), `${process.pid}\n`, "utf8");
   await startupRecovery();
   while (!shuttingDown) {
     const jobs = await listJobs();
-    const next = jobs.find((j) => j.status === "pending");
-    if (!next) {
-      await sleep(pollMs());
-      continue;
+    if (shuttingDown) break;
+    let ranJob = false;
+    for (const next of jobs) {
+      if (shuttingDown) break;
+      if (next.status !== "pending") continue;
+      const fresh = await readJob(next.id);
+      if (shuttingDown) break;
+      if (!fresh || fresh.status !== "pending") continue;
+      if (!(await claimJob(next.id, `worker:${process.pid}`))) continue;
+      if (shuttingDown) {
+        try {
+          await releaseClaim(next.id);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          log(`job=${next.id} claim release failed: ${message}`);
+        }
+        break;
+      }
+      await runJob(fresh);
+      ranJob = true;
+      break;
     }
-    const fresh = await readJob(next.id);
-    if (!fresh || fresh.status !== "pending") continue;
-    await runJob(fresh);
+    if (!ranJob && !shuttingDown) {
+      await sleep(pollMs());
+    }
+  }
+  try {
+    await unlink(join(jobsDir(), "worker.pid"));
+  } catch {
+    // Best-effort cleanup: ignore removal errors.
   }
   log("shutting down");
 }

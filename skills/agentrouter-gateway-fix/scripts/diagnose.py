@@ -33,14 +33,10 @@ MODES = (
         "status `incomplete`, `incomplete_details.reason` equal to "
         "`max_output_tokens`, zero text; usage output 16,000 and reasoning 16,000",
         (
-            ("incomplete", "max_output_tokens"),
-            ("incomplete_details.reason", "max_output_tokens"),
             ("incomplete", "zero text"),
             ("incomplete_details.reason", "zero text"),
             ("max_output_tokens", "zero text"),
             ("incomplete_details.reason", "max_output_tokens", "zero text"),
-            ("usage output 16,000 and reasoning 16,000",),
-            ("max_output_tokens", "usage output 16,000 and reasoning 16,000"),
             ("zero text", "usage output 16,000 and reasoning 16,000"),
         ),
     ),
@@ -75,20 +71,22 @@ MODES = (
     ),
     Mode(
         "claude-opus-5-5 max_tokens thinking with zero text "
-        "(historical only; not currently served)",
+        "(historical only)",
         "`claude-opus-5-5` spending the full `max_tokens` budget thinking "
         "while returning zero text",
         (
             ("claude-opus-5-5", "zero text"),
-            ("max_tokens", "zero text"),
             ("claude-opus-5-5", "max_tokens", "zero text"),
         ),
     ),
     Mode(
         "DeepSeek and Claude 503 no-channel "
-        "(historical only; not currently served)",
+        "(historical only)",
         "DeepSeek and Claude 503 `no-channel`",
-        (("no-channel",),),
+        (
+            ("deepseek", "503", "no-channel"),
+            ("claude", "503", "no-channel"),
+        ),
     ),
     Mode(
         "Saved JSON pending after failed job",
@@ -146,8 +144,10 @@ POSSIBLE_FRAGMENTS = {
         "incomplete_details.reason",
         "max_output_tokens",
         "zero text",
+        "usage output 16,000 and reasoning 16,000",
     ),
     8: ("zero text",),
+    9: ("no-channel",),
     10: ("pending",),
     12: ("max_output_tokens",),
 }

@@ -54,12 +54,12 @@ node mcp-chat.mjs --list
 
 Confirm the server and its 12 tools, and inspect their exact names and calling schemas. Investigate failed discovery or a different count before proceeding.
 
-Select a real section prompt and use a fresh stateless Astra Responses request. Keep `max_tokens: 32000` in the call. Size the section prompt using [prompt sizing](references/prompt-sizing.md) before running it. Do not resume a dead upstream chain.
+Select a real section prompt and use a fresh stateless Astra Responses request. Keep `max_tokens: 32000` in the call. Size the section prompt using [prompt sizing](prompt-sizing.md) before running it. Do not resume a dead upstream chain.
 
-Read the [lane client](~/workspace/bawa-wallet/agent-g-android/mcp-chat.mjs), or its api1 twin when using that lane, and the `agentrouter_chat` body construction in [server.ts](mcp-server/src/server.ts). Confirm the effective settings before claiming a pass:
+Read the lane client at `~/workspace/bawa-wallet/agent-g-android/mcp-chat.mjs`, or its api1 twin when using that lane, and the `agentrouter_chat` body construction in [server.ts](../../../mcp-server/src/server.ts). Confirm the effective settings before claiming a pass:
 
 - The client calls `agentrouter_chat` with `model: "gpt-6-astra"`, `messages: [{ role: "user", content: prompt }]`, `max_tokens: 32000` and `effort: "max"`.
-- The server maps Astra to `/v1/responses`, sets `stream: true`, maps the cap to `max_output_tokens: min(max_tokens, 32000)` and sends `reasoning: { effort: "max" }`. With these call arguments, the effective cap is `32000`.
+- The server maps Astra to `/v1/responses`, sets `stream: true` and sends `reasoning: { effort: "max" }`. The cap goes through the shared ceiling in `mcp-server/src/server.ts`, where line 215 sets `max_tokens = astra ? config.astraMaxTokens : 4096` and line 219 applies `max_tokens = Math.min(max_tokens, config.astraMaxTokens)` before line 227 sends `max_output_tokens: max_tokens` with `store: false`. With these call arguments, the effective cap is `32000`.
 - The server sets `store: false`, and the outgoing request contains no `previous_response_id` or other previous-response reference. Check that each call carries only its own messages, with no chained state; `store: false` alone is not the continuation-state check.
 
 Before running, arrange to preserve that call's full Responses object, returned as tool result JSON, before the lane client extracts `output_text`. The client writes only the text to the output file and does not save the raw JSON. Its own `mcp-request-log.jsonl` records request metadata, with elapsed time and answer character count as the only outcome measurements. It does not carry terminal status or usage.
@@ -72,7 +72,7 @@ node mcp-chat.mjs prompts/<section>.md <output>.md
 
 Alternatively, make the fresh call by invoking `agentrouter_chat` directly using its discovered schema and the confirmed arguments, preserving the returned JSON. Read `status` and `usage` from that call's own result. Do not take either field from another call's receipt.
 
-For worker jobs, invoke `agentrouter_job_status` to poll the current job live and `agentrouter_job_result` to retrieve its result, using the exact invocation and schemas from discovery. Read that job's own `status` and `usage` from its result file under `mcp-server/jobs/`.
+For worker jobs, invoke `agentrouter_job_status` to poll the current job live and `agentrouter_job_result` to retrieve its result, using the exact invocation and schemas from discovery. Read that job's own `status` and `usage` from its result file under `mcp-server/jobs/`. `claimJob` in `mcp-server/src/jobs.ts` claims jobs atomically using exclusive claim file creation, with a 120-second stale break. `readJob` merges the heartbeat sidecar into `last_heartbeat`. At startup, the worker marks running jobs whose heartbeat is older than 120 seconds as `interrupted` unless `AGENTROUTER_JOB_AUTO_RESUBMIT=1` is set, in which case it re-queues them.
 
 Inspect the returned result, generated Markdown and that call's receipt. Do not rely on a success message alone. Before claiming a generation pass, require:
 

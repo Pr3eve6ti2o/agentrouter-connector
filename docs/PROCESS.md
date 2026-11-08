@@ -9,6 +9,7 @@
 - `src/retry.ts`: transient retry/backoff with `Retry-After` support.
 - `src/redact.ts`: obvious secret-like prompt redaction.
 - `src/ledger.ts`: JSONL usage/audit events without raw prompts by default.
+- `src/agentrouter.ts`: Upstream client; exports `joinUrl` for joining the base URL and path, tested in `tests/url.test.ts`.
 
 ## 2. Endpoint distinction: do not mix the surfaces silently
 
@@ -33,6 +34,8 @@ Current AgentRouter public docs now document a capability-first Agentic API at `
 9. Start `npm start`.
 
 ## 4. Verification sequence
+
+Root smoke has a pre-existing quirk, not a regression: `npm run smoke` currently fails because `tsx` is not installed at the root (no root `node_modules`). Use `npx tsx scripts/smoke.ts` instead; the verified run returned `{"ok":true,"localUpstreamPort":37269}`.
 
 ### A. Process-only
 
@@ -103,3 +106,9 @@ This build maximizes utilization through:
 - a usage ledger for auditability.
 
 It does not bypass AgentRouter/provider quotas, billing, authentication, or WAF restrictions.
+
+## 8. Public host fallback
+
+`MCP_PUBLIC_HOST` sets `config.server.publicHost`. The allowed-host check uses `MCP_ALLOWED_HOSTS`, falling back to `config.server.publicHost` when `MCP_ALLOWED_HOSTS` is unset. `MCP_PUBLIC_HOST` defaults to an empty string, so any host is allowed when `MCP_ALLOWED_HOSTS` is also unset.
+
+It is listed as a commented line in the root `.env.example`.

@@ -3,12 +3,12 @@ import { UpstreamHttpError } from './errors.js';
 import { isFallbackWorthyStatus, isRetryableStatus, retryAfterMsFromHeaders, withRetries } from './retry.js';
 import type { ChatRequest } from './types.js';
 
-function joinUrl(base: string, path: string): string {
+export function joinUrl(base: string, path: string): string {
   return `${base.replace(/\/+$/, '')}/${path.replace(/^\/+/, '')}`;
 }
 
 export class AgentRouterClient {
-  private readonly baseUrl = config.upstream.baseUrl.replace(/\/+$/, '');
+  private readonly baseUrl = config.upstream.baseUrl;
 
   private headers(extra?: HeadersInit): Headers {
     const h = new Headers({
@@ -53,14 +53,15 @@ export class AgentRouterClient {
   }
 
   private async rawRequest(path: string, init: RequestInit & { retryable?: boolean }): Promise<Response> {
+    const { retryable, ...requestInit } = init;
     const url = joinUrl(this.baseUrl, path);
     const doFetch = async (): Promise<Response> => {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), config.runtime.requestTimeoutMs);
       try {
         const response = await fetch(url, {
-          ...init,
-          headers: this.headers(init.headers),
+          ...requestInit,
+          headers: this.headers(requestInit.headers),
           signal: controller.signal
         });
         if (!response.ok) {
@@ -74,7 +75,7 @@ export class AgentRouterClient {
     };
 
     return withRetries(doFetch, {
-      retries: init.retryable ? config.runtime.maxRetries : 0,
+      retries: retryable ? config.runtime.maxRetries : 0,
       baseDelayMs: config.runtime.backoffBaseMs,
       shouldRetry: (error) => error instanceof UpstreamHttpError && isRetryableStatus(error.status),
       retryDelayMs: (error) => error instanceof UpstreamHttpError ? retryAfterMsFromHeaders(error.headers) : undefined

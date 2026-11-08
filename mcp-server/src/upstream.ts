@@ -1,7 +1,9 @@
-// Sol revision 2026-10-31, part A of 3, rotation/retry core for the MCP v2 upgrade;
+// Sol revision 2026-10-31, rotation/retry core for the MCP v2 upgrade;
 // original 2026-10-23 glue header preserved in spirit.
 import { appendFile, readFile } from "node:fs/promises";
 import { config } from "./config.js";
+import { clientHeaders } from "./env.js";
+export { clientHeaders };
 
 export const apiKeys = config.apiKeys;
 
@@ -18,12 +20,7 @@ export function astraMaxTokens(): number {
   return config.astraMaxTokens;
 }
 
-const clientHeaders = {
-  Originator: "codex_cli_rs",
-  Version: "0.101.0",
-  "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
-  "Content-Type": "application/json",
-};
+export const ANTHROPIC_TIMEOUT_MS = 120_000;
 
 export function isAnthropic(model: string): boolean {
   return /claude/i.test(model);
@@ -115,8 +112,11 @@ function buildBody(model: string, prompt: string, options: ChatOptions): unknown
     throw new Error("reasoning effort 'low' is rejected for gpt-6-astra and must not be sent");
   if (options.effort !== undefined && options.effort !== "max" && options.effort !== "low")
     throw new Error(`unknown effort: ${String(options.effort)}`);
+  // 2026-11-07: cap raised 16,000 -> 32,000 (B1a2a needed 16,536 reasoning
+  // tokens; the old cap starved it to zero text). Non-streamed callers keep
+  // stream:false; the streamed chat path lives in server.ts.
   const cap = astra
-    ? (options.maxTokens == null ? astraMaxTokens() : Math.min(options.maxTokens, 16000))
+    ? (options.maxTokens == null ? astraMaxTokens() : Math.min(options.maxTokens, astraMaxTokens()))
     : options.maxTokens ?? 3200;
   return {
     model, input: [{ role: "user", content: prompt }],
@@ -126,7 +126,7 @@ function buildBody(model: string, prompt: string, options: ChatOptions): unknown
   };
 }
 
-function extractUsage(value: unknown): { tokens: number; reasoningTokens: number; textTokens: number } {
+export function extractUsage(value: unknown): { tokens: number; reasoningTokens: number; textTokens: number } {
   const usage = (value as any)?.usage;
   if (!usage || typeof usage !== "object")
     return { tokens: 0, reasoningTokens: 0, textTokens: 0 };
@@ -137,7 +137,12 @@ function extractUsage(value: unknown): { tokens: number; reasoningTokens: number
   const reasoning = usage.output_tokens_details?.reasoning_tokens;
   const reasoningTokens = typeof reasoning === "number" ? reasoning
     : typeof usage.reasoning_tokens === "number" ? usage.reasoning_tokens : 0;
-  return { tokens, reasoningTokens, textTokens: tokens > 0 ? Math.max(0, tokens - reasoningTokens) : 0 };
+  return {
+    tokens,
+    reasoningTokens,
+    textTokens: typeof usage.output_tokens === "number"
+      ? Math.max(0, usage.output_tokens - reasoningTokens) : 0
+  };
 }
 
 type RunResult =
@@ -153,7 +158,7 @@ async function runDetailed(
   const body = buildBody(task.model, task.prompt, options);
   const anthropic = isAnthropic(task.model);
   const rounds = Math.max(1, options.rounds ?? retryRounds());
-  const timeoutMs = options.timeoutMs ?? (anthropic ? 120000 : responsesTimeoutMs());
+  const timeoutMs = options.timeoutMs ?? (anthropic ? ANTHROPIC_TIMEOUT_MS : responsesTimeoutMs());
   const path = anthropic ? "/messages" : "/responses";
   const matrix = combos();
   if (!matrix.length) throw new Error("No host x key combos configured for AgentRouter");
@@ -180,7 +185,35 @@ async function runDetailed(
         if (status >= 200 && status <= 299) {
           let value: unknown;
           try { value = JSON.parse(text); }
-          catch { throw new Error("AgentRouter returned invalid JSON"); }
+          catch {
+            return {
+              ok: false,
+              error: new Error("AgentRouter returned invalid JSON"),
+              attempts: attemptIndex + 1, host: combo.host, keyIndex: combo.keyIndex,
+              status, kind: "upstream-transient",
+              latencyMs: Date.now() - callStart
+            };
+          }
+          if (!anthropic && value !== null && typeof value === "object") {
+            const response = value as {
+              status?: unknown;
+              incomplete_details?: { reason?: unknown } | null;
+              error?: { code?: unknown } | null;
+            };
+            if (typeof response.status === "string" && response.status !== "completed") {
+              const reason = response.incomplete_details?.reason ?? response.error?.code ?? "";
+              // In particular, retrying max_output_tokens starvation burns the same cap again.
+              return {
+                ok: false,
+                error: new Error(
+                  `AgentRouter /responses gateway status: ${response.status}${reason ? ` (${reason})` : ""}`
+                ),
+                attempts: attemptIndex + 1, host: combo.host, keyIndex: combo.keyIndex,
+                status, kind: "upstream-transient",
+                latencyMs: Date.now() - callStart
+              };
+            }
+          }
           return {
             ok: true, detail: {
               value, attempts: attemptIndex + 1, host: combo.host,
@@ -210,13 +243,22 @@ export async function chatDetailed(
 ): Promise<ChatDetail> {
   const result = await runDetailed(task, options);
   if (result.ok === false) {
-    const error = result.error;
-    (error as any).attempts = result.attempts;
-    (error as any).host = result.host;
-    (error as any).keyIndex = result.keyIndex;
-    (error as any).status = result.status;
-    (error as any).kind = result.kind;
-    (error as any).latencyMs = result.latencyMs;
+    type DetailedChatError = Error & {
+      attempts: typeof result.attempts;
+      host: typeof result.host;
+      keyIndex: typeof result.keyIndex;
+      status: typeof result.status;
+      kind: typeof result.kind;
+      latencyMs: typeof result.latencyMs;
+    };
+
+    const error = result.error as DetailedChatError;
+    error.attempts = result.attempts;
+    error.host = result.host;
+    error.keyIndex = result.keyIndex;
+    error.status = result.status;
+    error.kind = result.kind;
+    error.latencyMs = result.latencyMs;
     throw error;
   }
   return result.detail;
@@ -228,7 +270,7 @@ export async function chatOnce(
   return (await chatDetailed(task, options)).value;
 }
 
-// appendLedger is defined in Part C after concatenation.
+// appendLedger is defined below in this module.
 export async function chatWithRetry(
   task: { model: string; prompt: string }, options: ChatOptions = {}
 ): Promise<unknown> {
@@ -255,7 +297,7 @@ export async function chatWithRetry(
   return detail.value;
 }
 
-// probes and ledger (Part C).
+// probes and ledger.
 function pingBody(model: string): unknown {
   return isAnthropic(model)
     ? { model, messages: [{ role: "user", content: "ping" }], max_tokens: 16 }
@@ -283,7 +325,7 @@ export async function probeCombo(
 export async function probe(
   model: string, key: string
 ): Promise<{ status: number; body: string }> {
-  const { status, body } = await probeCombo(model, hosts()[0] || "agentrouter.org", key);
+  const { status, body } = await probeCombo(model, hosts()[0], key);
   return { status, body };
 }
 
@@ -292,22 +334,9 @@ export async function probeOnce(model: string, key: string): Promise<{ status: n
   return { status };
 }
 
-export async function probeAll(model: string): Promise<Array<{
-  host: string; keyIndex: number; status: number; body: string; latencyMs: number;
-}>> {
-  const results: Array<{
-    host: string; keyIndex: number; status: number; body: string; latencyMs: number;
-  }> = [];
-  for (const combo of combos()) {
-    const key = (combo as Combo & { key?: string }).key ?? apiKeys[combo.keyIndex];
-    const result = await probeCombo(model, combo.host, key);
-    results.push({ ...result, keyIndex: combo.keyIndex });
-  }
-  return results;
-}
 
 function ledgerPath(): string {
-  return process.env.AGENTROUTER_LEDGER_PATH?.trim() || "ledger.jsonl";
+  return config.ledgerPath ?? "ledger.jsonl";
 }
 
 export type LedgerEntry = {

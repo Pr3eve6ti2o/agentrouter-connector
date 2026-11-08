@@ -2,7 +2,8 @@
 // Per-task results report index/attempts/kind.
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { chatDetailed, appendLedger } from "../upstream.js";
+import { chatDetailed, appendLedger, extractUsage } from "../upstream.js";
+import { caps } from "../config.js";
 
 type ChatTask = {
   model: string;
@@ -30,45 +31,41 @@ type BatchResult = { index: number } & (
     }
 );
 
+function isObjectLike(value: unknown): value is Record<string, unknown> {
+  return (
+    (typeof value === "object" && value !== null) || typeof value === "function"
+  );
+}
+
+function safeString(value: unknown): string {
+  try {
+    return String(value);
+  } catch {
+    return "Unknown error";
+  }
+}
+
 async function batchChat(
   tasks: ChatTask[],
   concurrency?: number,
 ): Promise<BatchResult[]> {
-  if (tasks.length > 32) throw new RangeError("At most 32 tasks are allowed");
+  if (tasks.length > caps.maxBatchTasks) throw new RangeError(`At most ${caps.maxBatchTasks} tasks are allowed`);
 
   const poolSize =
     concurrency === undefined
-      ? (tasks.some((task) => /^gpt-6-astra$/i.test(task.model)) ? 1 : 8)
-      : Math.max(1, Math.min(8, concurrency));
+      ? (tasks.some((task) => /^gpt-6-astra$/i.test(task.model)) ? 1 : caps.maxConcurrency)
+      : Math.max(1, Math.min(caps.maxConcurrency, concurrency));
 
   const results = new Array<BatchResult>(tasks.length);
-  let next = 0;
+  // All workers share this iterator so each task is claimed once.
+  const taskEntries = tasks.entries();
 
   async function worker(): Promise<void> {
-    while (next < tasks.length) {
-      const index = next++;
-      const task = tasks[index]!;
-
+    for (const [index, task] of taskEntries) {
       try {
         const detail = await chatDetailed(task, { effort: task.effort });
-        const usage = (detail.value as any)?.usage;
-        const tokens =
-          typeof usage?.total_tokens === "number"
-            ? usage.total_tokens
-            : typeof usage?.input_tokens === "number" &&
-                typeof usage?.output_tokens === "number"
-              ? usage.input_tokens + usage.output_tokens
-              : typeof usage?.output_tokens === "number"
-                ? usage.output_tokens
-                : 0;
-        const reasoningTokens =
-          typeof usage?.output_tokens_details?.reasoning_tokens === "number"
-            ? usage.output_tokens_details.reasoning_tokens
-            : typeof usage?.reasoning_tokens === "number"
-              ? usage.reasoning_tokens
-              : 0;
-        const textTokens =
-          tokens > 0 ? Math.max(0, tokens - reasoningTokens) : 0;
+        const value: unknown = detail.value;
+        const { tokens, reasoningTokens, textTokens } = extractUsage(value);
 
         try {
           await appendLedger({
@@ -96,17 +93,17 @@ async function batchChat(
           keyIndex: detail.keyIndex,
           latencyMs: detail.latencyMs,
         };
-      } catch (error) {
-        const e = error as any;
+      } catch (error: unknown) {
+        const e = isObjectLike(error) ? error : undefined;
         const kind =
-          typeof e?.kind === "string"
-            ? e.kind
-            : (String(e?.message ?? error).match(/\[([^\]]+)\]/)?.[1] ??
+          typeof e?.["kind"] === "string"
+            ? e["kind"]
+            : (safeString(e?.["message"] ?? error).match(/\[([^\]]+)\]/)?.[1] ??
               "unknown");
-        const attempts = typeof e?.attempts === "number" ? e.attempts : 0;
-        const host = typeof e?.host === "string" ? e.host : "unknown";
-        const keyIndex = typeof e?.keyIndex === "number" ? e.keyIndex : -1;
-        const status = typeof e?.status === "number" ? e.status : null;
+        const attempts = typeof e?.["attempts"] === "number" ? e["attempts"] : 0;
+        const host = typeof e?.["host"] === "string" ? e["host"] : "unknown";
+        const keyIndex = typeof e?.["keyIndex"] === "number" ? e["keyIndex"] : -1;
+        const status = typeof e?.["status"] === "number" ? e["status"] : null;
 
         try {
           await appendLedger({
@@ -117,7 +114,7 @@ async function batchChat(
             status,
             errorKind: kind,
             attempts,
-            latencyMs: typeof e?.latencyMs === "number" ? e.latencyMs : 0,
+            latencyMs: typeof e?.["latencyMs"] === "number" ? e["latencyMs"] : 0,
             reasoningTokens: 0,
             textTokens: 0,
           });
@@ -128,7 +125,7 @@ async function batchChat(
         results[index] = {
           index,
           ok: false,
-          error: error instanceof Error ? error.message : String(error),
+          error: error instanceof Error ? error.message : safeString(error),
           kind,
           attempts,
           host,
@@ -159,15 +156,12 @@ export function registerBatch(server: McpServer): void {
               effort: z.enum(["max", "low"]).optional(),
             }),
           )
-          .max(32),
-        concurrency: z.number().int().min(1).max(8).optional(),
+          .max(caps.maxBatchTasks),
+        concurrency: z.number().int().min(1).max(caps.maxConcurrency).optional(),
       },
     },
     async ({ requests, concurrency }) => {
-      // [glue] Cast: the SDK's schema inference types the array elements'
-      // fields as optional; the zod schema above still validates model and
-      // prompt as required strings at runtime.
-      const result = await batchChat(requests as ChatTask[], concurrency);
+      const result = await batchChat(requests, concurrency);
       return {
         content: [{ type: "text", text: JSON.stringify(result) }],
       };

@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """Parallel delegation runner for external-model jobs.
 
-Reads a job JSON file, fans tasks out in parallel through the agentrouter
-skill's ar_call.py, enforces spend caps, writes each result into the output
+Reads a job JSON file, fans tasks out in parallel through the sibling
+ar_call.py, enforces spend caps, writes each result into the output
 directory, and appends usage to the spend ledger.
 
-Job file format (see references/job-spec.md):
+Job file format:
 {
   "name": "trial-001",
   "per_run_cap_usd": 0.50,
@@ -28,7 +28,8 @@ import subprocess
 import sys
 import time
 
-AR_CALL = os.path.expanduser("~/workspace/skills/agentrouter/bin/ar_call.py")
+AR_CALL = os.path.join(
+    os.path.dirname(os.path.realpath(__file__)), "ar_call.py")
 DEFAULT_LEDGER = os.path.expanduser(
     "~/workspace/skills/external-delegate/ledger.json")
 
@@ -65,9 +66,11 @@ def estimate_cost_usd(model, prompt_tokens_est, max_tokens):
     return (prompt_tokens_est + max_tokens) / 1_000_000 * rate
 
 
-def _call_api(model, messages, max_tokens, timeout=600, host=None, api_key=None):
+def _call_api(
+    model, messages, max_tokens, timeout=600, host=None, api_key=None
+):
     """Single API call. Returns (text, usage_dict, error_str).
-    
+
     If api_key is provided, makes a direct HTTPS call to the given host
     with that key. Otherwise uses ar_call.py with the stored credential.
     """
@@ -76,7 +79,7 @@ def _call_api(model, messages, max_tokens, timeout=600, host=None, api_key=None)
         "messages": messages,
         "max_tokens": max_tokens,
     })
-    
+
     # Direct call with raw API key (for second key on backup host)
     if api_key:
         import urllib.request
@@ -90,48 +93,76 @@ def _call_api(model, messages, max_tokens, timeout=600, host=None, api_key=None)
                     "Authorization": f"Bearer {api_key}",
                     "Originator": "codex_cli_rs",
                     "Version": "0.101.0",
-                    "User-Agent": "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) Apple_Terminal/464",
+                    "User-Agent": (
+                        "codex_cli_rs/0.101.0 (Mac OS 26.0.1; arm64) "
+                        "Apple_Terminal/464"
+                    ),
                 },
                 method="POST")
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
-            usage = data.get("usage", {}) or {}
-            text = ""
-            try:
-                msg = data["choices"][0]["message"]
-                text = msg.get("content") or msg.get("reasoning_content") or ""
-            except (KeyError, IndexError, TypeError):
-                pass
-            return text or "", usage, ""
         except Exception as e:
             return "", {}, f"direct: {str(e)[:200]}"
-    
-    try:
-        cmd = [sys.executable, AR_CALL, "--path", "/v1/chat/completions",
-               "--method", "POST", "--timeout", str(timeout), "--data", payload]
-        if host:
-            cmd.extend(["--host", host])
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout + 30)
-    except subprocess.TimeoutExpired:
-        return "", {}, "runner: ar_call timed out"
-    try:
-        resp = json.loads(proc.stdout)
-    except json.JSONDecodeError:
-        return "", {}, "runner: bad JSON from ar_call: " + proc.stderr[:200]
-    if not resp.get("ok"):
-        return "", {}, str(resp.get("error", "unknown"))[:200]
-    data = resp.get("data", {})
+    else:
+        try:
+            cmd = [
+                sys.executable, AR_CALL, "--path", "/v1/chat/completions",
+                "--method", "POST", "--timeout", str(timeout),
+                "--data", payload,
+            ]
+            if host:
+                cmd.extend(["--host", host])
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=timeout + 30)
+        except subprocess.TimeoutExpired:
+            return "", {}, "runner: ar_call timed out"
+        except OSError as e:
+            return "", {}, f"runner: {str(e)[:200]}"
+        try:
+            resp = json.loads(proc.stdout)
+        except json.JSONDecodeError:
+            error = "runner: bad JSON from ar_call: " + proc.stderr[:200]
+            return "", {}, error
+        if not isinstance(resp, dict):
+            return "", {}, "runner: expected a JSON object from ar_call"
+        if not resp.get("ok"):
+            return "", {}, str(resp.get("error", "unknown"))[:200]
+        data = resp.get("data", {})
+
+    source = "direct" if api_key else "runner"
+    if not isinstance(data, dict):
+        return "", {}, f"{source}: response data is not a JSON object"
     usage = data.get("usage", {}) or {}
+    if not isinstance(usage, dict):
+        return "", {}, f"{source}: usage is not a JSON object"
     text = ""
     try:
         msg = data["choices"][0]["message"]
+        if not isinstance(msg, dict):
+            return "", {}, f"{source}: message is not a JSON object"
         # Some reasoning models put output in reasoning_content with empty
         # content; prefer content, fall back to reasoning_content.
         text = msg.get("content") or msg.get("reasoning_content") or ""
     except (KeyError, IndexError, TypeError):
         pass
-    return text or "", usage, ""
+    if not isinstance(text, str):
+        return "", {}, f"{source}: response content is not a string"
+    return text, usage, ""
+
+
+def _content_text(content):
+    """Extract text from strings or multipart content without stringifying data."""
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    text_parts = []
+    for part in content:
+        if isinstance(part, dict):
+            part = part.get("text")
+        if isinstance(part, str):
+            text_parts.append(part)
+    return "".join(text_parts)
 
 
 def _reword_prompt(messages):
@@ -143,14 +174,19 @@ def _reword_prompt(messages):
     # Find the main user content (longest user message) and extract code block
     user_text = ""
     for m in messages:
-        if m.get("role") == "user" and len(m.get("content", "")) > len(user_text):
-            user_text = m["content"]
+        if m.get("role") != "user":
+            continue
+        content = _content_text(m.get("content", ""))
+        if len(content) > len(user_text):
+            user_text = content
     code = user_text
     # Try to isolate a CODE: section if present
     idx = user_text.find("CODE:\n")
     if idx >= 0:
-        end = user_text.find("\n\nDo TWO things:")
-        code = user_text[idx + 6:end].strip() if end > idx else user_text[idx + 6:].strip()
+        start = idx + len("CODE:\n")
+        end = user_text.find("\n\nDo TWO things:", idx)
+        code = user_text[start:end] if end >= 0 else user_text[start:]
+        code = code.strip()
     return [{
         "role": "user",
         "content": (
@@ -181,15 +217,13 @@ def _fsync_dir(path):
 
 
 def _atomic_write_json(path, obj):
-    """Write JSON so a crash can never leave a truncated file behind.
+    """Atomically replace a JSON file after flushing its contents to disk.
 
-    Writes to a temp file in the same directory, fsyncs it, then renames
-    atomically over the target and fsyncs the directory. After a VM wipe
-    at any instant, either the old complete file or the new complete
-    file is on disk — never half of one, and never an unflushed buffer.
+    Write and fsync a temporary file in the same directory, then replace
+    the target and attempt to fsync the directory for durability.
     """
     tmp = f"{path}.tmp-{os.getpid()}"
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, ensure_ascii=False, indent=2)
         f.flush()
         os.fsync(f.fileno())
@@ -205,19 +239,25 @@ def _load_completed(out_dir, task_id):
     """
     path = os.path.join(out_dir, f"{task_id}.json")
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             prev = json.load(f)
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if (prev.get("id") == task_id and prev.get("ok")
-            and len(str(prev.get("text", ""))) >= MIN_TEXT_LEN):
+    if not isinstance(prev, dict):
+        return None
+    text = prev.get("text", "")
+    if (
+        prev.get("id") == task_id
+        and prev.get("ok")
+        and isinstance(text, str)
+        and len(text.strip()) >= MIN_TEXT_LEN
+    ):
         return prev
     return None
 
 
 def _write_progress(out_dir, job, tasks, resumed, fresh):
-    """Atomically snapshot batch progress after every finished section,
-    so the state of a run survives a VM wipe at any point."""
+    """Atomically snapshot batch progress after every finished section."""
     done = {**resumed, **fresh}
     progress = {
         "job": job.get("name", ""),
@@ -242,7 +282,7 @@ def run_task(task):
     prompt) so intermittent blank completions never masquerade as success.
     """
     task_id = task.get("id", "task")
-    model = task["model"]
+    model = task.get("model")
     messages = task["messages"]
     max_tokens = int(task.get("max_tokens", 500))
     task_host = task.get("host")  # e.g. "co.agentrouter.org" for backup
@@ -255,6 +295,21 @@ def run_task(task):
         if isinstance(content, str):
             content, notes = redact(content)
             redactions.extend(notes)
+        elif isinstance(content, list):
+            clean_parts = []
+            for part in content:
+                part_text = (
+                    part.get("text") if isinstance(part, dict) else part
+                )
+                if isinstance(part_text, str):
+                    part_text, notes = redact(part_text)
+                    redactions.extend(notes)
+                    if isinstance(part, dict):
+                        part = {**part, "text": part_text}
+                    else:
+                        part = part_text
+                clean_parts.append(part)
+            content = clean_parts
         clean_messages.append({**m, "content": content})
 
     started = time.time()
@@ -272,7 +327,9 @@ def run_task(task):
         if err:
             last_error = err
             continue
-        if len(text.strip()) >= MIN_TEXT_LEN:
+        text = _content_text(text)
+        text_len = len(text.strip())
+        if text_len >= MIN_TEXT_LEN:
             result.update({
                 "ok": True,
                 "text": text,
@@ -284,8 +341,9 @@ def run_task(task):
             })
             result["elapsed_s"] = round(time.time() - started, 1)
             return result
-        last_error = (f"empty/short response ({len(text.strip())} chars, "
-                      f"attempt {attempts})")
+        last_error = (
+            f"empty/short response ({text_len} chars, attempt {attempts})"
+        )
     # All attempts failed or returned blank: report failure, never fake success.
     result.update({
         "ok": False,
@@ -308,6 +366,8 @@ def main():
                     help="ignore sections already saved in the output "
                          "directory and re-run every task")
     args = ap.parse_args()
+    if args.workers <= 0:
+        ap.error("--workers must be greater than 0")
 
     with open(args.job) as f:
         job = json.load(f)
@@ -335,9 +395,10 @@ def main():
     resumed = {}
     if not args.no_resume:
         for t in tasks:
-            prev = _load_completed(args.out, t.get("id", "task"))
+            task_id = t.get("id", "task")
+            prev = _load_completed(args.out, task_id)
             if prev is not None:
-                resumed[t["id"]] = prev
+                resumed[task_id] = prev
     pending = [t for t in tasks if t.get("id", "task") not in resumed]
     if resumed:
         print(f"resume: keeping {len(resumed)} saved section(s); "
@@ -348,7 +409,7 @@ def main():
     for t in pending:
         prompt_est = sum(len(str(m.get("content", ""))) // 4
                          for m in t.get("messages", []))
-        estimate += estimate_cost_usd(t["model"], prompt_est,
+        estimate += estimate_cost_usd(t.get("model"), prompt_est,
                                       int(t.get("max_tokens", 500)))
     if estimate > per_run_cap:
         print(json.dumps({"ok": False, "error": "cap_exceeded",
@@ -360,16 +421,26 @@ def main():
     if args.monthly_cap_usd and os.path.exists(args.ledger):
         try:
             with open(args.ledger) as f:
-                month_spend = sum(
-                    r.get("cost_usd_est", 0)
-                    for r in json.load(f).get("runs", []))
-        except (json.JSONDecodeError, KeyError):
+                ledger = json.load(f)
+            if not isinstance(ledger, dict) or not isinstance(
+                    ledger.get("runs", []), list):
+                print(json.dumps({"ok": False,
+                                  "error": "invalid ledger format"}))
+                return 1
+            month_spend = sum(
+                r.get("cost_usd_est", 0)
+                for r in ledger.get("runs", []))
+        except json.JSONDecodeError:
             pass
-        if month_spend + estimate > args.monthly_cap_usd:
-            print(json.dumps({"ok": False, "error": "monthly_cap_exceeded",
-                              "month_spend_usd": round(month_spend, 4),
-                              "estimated_usd": round(estimate, 4)}))
+        except (AttributeError, TypeError):
+            print(json.dumps({"ok": False,
+                              "error": "invalid ledger run data"}))
             return 1
+    if args.monthly_cap_usd and month_spend + estimate > args.monthly_cap_usd:
+        print(json.dumps({"ok": False, "error": "monthly_cap_exceeded",
+                          "month_spend_usd": round(month_spend, 4),
+                          "estimated_usd": round(estimate, 4)}))
+        return 1
 
     _write_progress(args.out, job, tasks, resumed, {})
     results = list(resumed.values())
@@ -425,7 +496,11 @@ def main():
                 ledger = json.load(f)
         except json.JSONDecodeError:
             pass
-    ledger["runs"].append(summary)
+    if not isinstance(ledger, dict) or not isinstance(
+            ledger.get("runs", []), list):
+        print(json.dumps({"ok": False, "error": "invalid ledger format"}))
+        return 1
+    ledger.setdefault("runs", []).append(summary)
     _atomic_write_json(args.ledger, ledger)
 
     print(json.dumps({"ok": summary["ok"], "summary": summary}))

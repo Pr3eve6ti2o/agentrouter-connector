@@ -7,7 +7,10 @@ const server = createServer((_req, res) => {
 });
 server.listen(0, '127.0.0.1');
 await once(server, 'listening');
-const address = server.address();
-if (!address || typeof address === 'string') throw new Error('failed to bind');
-console.log(JSON.stringify({ ok: true, localUpstreamPort: address.port }));
-server.close();
+try {
+  const address = server.address();
+  if (!address || typeof address === 'string') throw new Error('failed to bind');
+  console.log(JSON.stringify({ ok: true, localUpstreamPort: address.port }));
+} finally {
+  server.close();
+}

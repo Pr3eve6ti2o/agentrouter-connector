@@ -50,3 +50,35 @@ Then perform the live AgentRouter catalog smoke and one tiny generation smoke de
 The execution environment does not have working DNS/network access to `agentrouter.org`/`co.agentrouter.org`, and the secure `custom.agentrouter` credential is not exposed to the local container. Therefore this environment could not repeat the user's live AgentRouter request against the connected account.
 
 The historical live verification remains explicitly attributed to the attached build record rather than being presented as a new live test.
+
+## Addendum — 2026-11-08: lint plus architecture verification
+
+This addendum records the lint plus architecture verification state after both passes were merged into the working copy on 2026-11-08.
+
+- Merged tree against HEAD `17ec298`: 38 files, 1144 insertions, 450 deletions.
+- Lint phase 1 alone: 36 files, 1036 insertions, 355 deletions.
+
+### Live verification on the merged tree
+
+- `mcp-server`: `tsc` clean; build OK.
+- Tool listing: 12 tools listed.
+- Tiny probe: `The probe works.` — 16 characters in 2,989 ms.
+- Compiled tests: 4/0.
+- Smoke check: OK.
+- Root `tsc`: 18 errors, all in the pre-existing missing-root-`node_modules` class (baseline 17 plus 1 explained `TS7006`); not a regression.
+
+The gateway-fix skill's `scripts/verify.sh` on the merged tree reported `BEHAVIOURAL 20/0`, `PASS 74/5` and `AUDIT 0/2`.
+
+The five failing `PASS` checks are the skill's textual pins on code moved by the lint and architecture passes: header literals to `env.ts`, clamps to `config.astraMaxTokens` and `astraMaxTokens()`, and the `tools/jobs.ts` cap. These are not behaviour failures; the docs pass updates those pins afterwards.
+
+### Architecture changes verified live
+
+- `tsconfig` has `strict` set to `true`.
+- New modules: `mcp-server/src/env.ts` and `mcp-server/src/sse.ts`.
+- Worker keys-only boot.
+- `jobs/worker.pid` plus the guard PID-file check replace `pgrep`.
+- Atomic job claims with a 120-second stale break plus a heartbeat sidecar.
+- Deliberate behaviour change: `textTokens` equals output tokens minus reasoning tokens.
+- `recordLedger` deleted.
+- `joinUrl` exported and tested.
+- One merge-time fix: `ensureJobsDir` before the `worker.pid` write.

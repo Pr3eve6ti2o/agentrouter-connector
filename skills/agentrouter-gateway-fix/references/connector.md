@@ -2,13 +2,15 @@
 
 This guide covers the stored `custom.agentrouter` credential in `~/workspace/.agentrouter-keys`. Verify that documented location on the machine running the skill. There is no credential collection step.
 
-Never ask the user to paste a raw key in chat, set a secret environment variable, pass a secret flag or write an auth file. The approved loader supplies the private values programmatically from the existing file.
+Never ask the user to paste a raw key in chat, set a secret environment variable, pass a secret flag or write an auth file. The approved loader is the lane client `~/workspace/bawa-wallet/agent-g-android/mcp-chat.mjs`, documented in `references/config.md` line 11, which supplies the private values programmatically from `~/workspace/.agentrouter-keys`.
 
 Keep shell tracing disabled. Never display the private file, print matching lines, dump the environment or log authorisation headers. Do not put raw credentials in commands, examples, request dumps or saved diagnostic artefacts. Record only non-secret check results.
 
 Treat a 401 or 403 as a question about the request before treating it as a question about the key. A request built without its credential can look like a request with a wrong token. Follow these checks in order.
 
 ## Confirm the private key file
+
+Before any check runs, follow [Bootstrap a fresh machine](config.md#bootstrap-a-fresh-machine) to resolve the key file path and the client path.
 
 Check the file as the account that launches the MCP server. Inspect its metadata without displaying its contents. Confirm that `~/workspace/.agentrouter-keys` exists and has mode 600. If necessary, correct only the existing file's permissions and recheck them before reading it.
 
@@ -18,11 +20,11 @@ Use a programmatic line check to confirm that at least one expected key line is 
 
 ## Confirm the server process loaded the file
 
-The approved loading code must read this same private file programmatically. Match the exact variable names, split each matching line at its first `=` and retain the private values only in memory. Require exactly one non-empty assignment for each name present, and at least one name present. Pass those values directly into the MCP server process environment under their corresponding names.
+The lane client `~/workspace/bawa-wallet/agent-g-android/mcp-chat.mjs` reads this same private file programmatically with `readFileSync` and retains the private values only in memory. The operator must use the programmatic line check to match the exact supported names, `AGENTROUTER_KEY_1` and `AGENTROUTER_KEY_2`, split each matching line at its first `=`, and confirm exactly one assignment with a non-empty trimmed value for each name present, with at least one of those names present. The named loader accepts any numeric suffix; it neither enforces one assignment per name nor checks every present name for a non-empty trimmed value. Duplicate matching lines overwrite silently; the last line wins, so duplicate assignments must be removed.
 
-If the file is missing, or no key line is present, stop rather than guessing. Do not execute the file as shell input or substitute an unrelated inherited environment value for a missing assignment.
+If the file is missing, or no key line is present, stop rather than guessing. Do not execute the file as shell input. An inherited environment value must never substitute for a missing assignment. Pass the file values directly into the MCP server process environment under their corresponding names. Before spawning, remove every inherited `AGENTROUTER_KEY_*` name that is not present in the file from that environment. Verify the child environment with `scripts/check-loading.mjs` GATE1, which fails on the file-absent, child-present inherited-key case.
 
-Lane clients spawn the server as a stdio subprocess. Inspect the caller actually being used and `~/workspace/agentrouter-connector/mcp-server/src/config.ts` to trace the child's environment. The documented lane-client inspection point is `~/workspace/bawa-wallet/agent-g-android/mcp-chat.mjs`; do not assume that a caller already performs the file load.
+Lane clients spawn the server as a stdio subprocess. Inspect the caller actually being used and `~/workspace/agentrouter-connector/mcp-server/src/config.ts` to trace the child's environment. The documented lane-client inspection point is `~/workspace/bawa-wallet/agent-g-android/mcp-chat.mjs`, which does perform the file load; do not assume that other, unnamed callers already perform that load.
 
 Supply the other required, non-secret settings to the same server process.
 
@@ -33,9 +35,10 @@ Supply the other required, non-secret settings to the same server process.
 
 Compare these model-limit settings with lines 31 to 42 of the documented lane client. Required configuration variables do not establish model availability. Leave optional settings unchanged for this authentication check.
 
-Verify loading inside the actual server process that will send the request, after configuration has been read. Compare its loaded private values with the corresponding file values in memory and report only pass or fail. A readable file, a configured parent shell or a successful build does not prove that the server loaded them. If loading cannot be verified, stop.
-
-At the final request send point, compare the credential being attached with the appropriate loaded value in memory. Confirm that it is present in the request handed to the transport. Follow the existing authentication code rather than guessing a header name or scheme. An environment value alone does not prove attachment.
+1. From the skill directory, before dispatching any request, run `node scripts/check-loading.mjs <server-root> <key-file>`. The arguments are optional when the documented defaults apply: server root `~/workspace/agentrouter-connector/mcp-server` and key file `~/workspace/.agentrouter-keys`. The script never prints credential values.
+2. Read the GATE1 lines. Every key name present in the file must show `child=present match=yes`, and no name absent from the file may show `child=present`. A GATE1 failure means the child environment does not match the file, for example an inherited credential survived into the server.
+3. Read the GATE2 lines. Every host and key combination must show `ok=true` with status 200. A GATE2 failure means the loaded credential was not accepted at the transport.
+4. If either gate fails, stop at that gate and do not dispatch. Both gates must pass before dispatch. A readable file, a configured parent shell, a successful build, or a `tools/list` response does not pass these gates.
 
 If temporary runtime checks are needed, keep them local and unpushed. Report only non-secret results on standard error, not diagnostic text on the MCP standard-output stream. After source changes, run `npm run build` from `~/workspace/agentrouter-connector/mcp-server`, inspect the compiled output and replace only old server processes you own. Verify the process used by the actual caller, not a separate test process.
 
@@ -43,7 +46,7 @@ For a direct server run, the launcher must invoke `node dist/src/server.js` from
 
 ## Confirm the required client headers
 
-Inspect `~/workspace/agentrouter-connector/mcp-server/src/server.ts` lines 113 to 116 and `~/workspace/agentrouter-connector/mcp-server/src/upstream.ts` lines 22 to 24 for the client identification headers.
+The client identification headers live in the shared `clientHeaders` in `~/workspace/agentrouter-connector/mcp-server/src/env.ts`, imported by `server.ts` at line 21 and imported and re-exported by `upstream.ts` at lines 5 to 6.
 
 - Send `Originator` with value `codex_cli_rs`.
 - Send `Version` with value `0.101.0`.

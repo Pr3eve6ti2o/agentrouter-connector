@@ -14,6 +14,22 @@ export function redactText(input: string): string {
   return out;
 }
 
+function redactToolArguments(input: string): string {
+  try {
+    JSON.parse(input);
+  } catch {
+    return redactText(input);
+  }
+
+  // Preserve JSON delimiters and non-string values when redacting arguments.
+  return input.replace(/"(?:\\.|[^"\\])*"/g, (literal) => {
+    const value: unknown = JSON.parse(literal);
+    if (typeof value !== 'string') return literal;
+    const redacted = redactText(value);
+    return redacted === value ? literal : JSON.stringify(redacted);
+  });
+}
+
 export function redactMessages<T>(messages: T): T {
   if (!Array.isArray(messages)) return messages;
   const arr: unknown[] = messages;
@@ -27,6 +43,20 @@ export function redactMessages<T>(messages: T): T {
         const p = { ...(part as Record<string, unknown>) };
         if (typeof p.text === 'string') p.text = redactText(p.text);
         return p;
+      });
+    }
+    if (Array.isArray(copy.tool_calls)) {
+      copy.tool_calls = copy.tool_calls.map((toolCall: unknown) => {
+        if (!toolCall || typeof toolCall !== 'object' || Array.isArray(toolCall)) return toolCall;
+        const call = toolCall as Record<string, unknown>;
+        const fn = call.function;
+        if (!fn || typeof fn !== 'object' || Array.isArray(fn)) return toolCall;
+        const functionCall = fn as Record<string, unknown>;
+        if (typeof functionCall.arguments !== 'string') return toolCall;
+        return {
+          ...call,
+          function: { ...functionCall, arguments: redactToolArguments(functionCall.arguments) }
+        };
       });
     }
     return copy;

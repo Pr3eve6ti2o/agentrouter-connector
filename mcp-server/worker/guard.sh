@@ -13,24 +13,49 @@
 # line, and do NOT enable it silently: enabling a recurring guard is a
 # separate decision from building the worker.
 set -u
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SCRIPT_DIR="$(dirname -- "$0")" || exit 1
+CDPATH= cd -- "$SCRIPT_DIR/.." || exit 1
+ROOT="$(pwd)" || exit 1
 JOBS_DIR="${AGENTROUTER_JOBS_PATH:-$ROOT/jobs}"
-mkdir -p "$JOBS_DIR"
+mkdir -p -- "$JOBS_DIR" || exit 1
 
-# Bracket pattern so pgrep does not match its own command line.
-if pgrep -f "[d]ist/src/worker.js" > /dev/null; then
-  exit 0
+worker_pid_file="${JOBS_DIR}/worker.pid"
+if [[ -e "$worker_pid_file" ]]; then
+  worker_pid="$(cat -- "$worker_pid_file" 2>/dev/null)" || worker_pid=""
+  if [[ "$worker_pid" =~ ^[1-9][0-9]*$ ]] &&
+     kill -0 -- "$worker_pid" 2>/dev/null &&
+     worker_cwd="$(readlink -f -- "/proc/${worker_pid}/cwd" 2>/dev/null)" &&
+     [[ "$worker_cwd" == "$ROOT" ]] &&
+     grep -aFq -- 'dist/src/worker.js' "/proc/${worker_pid}/cmdline" 2>/dev/null; then
+    exit 0
+  fi
+  printf 'guard: stale pid file %s; removing\n' "$worker_pid_file" >&2
+  rm -f -- "$worker_pid_file"
 fi
+
+# Missing executables would otherwise fail only in the background.
+for cmd in setsid nohup node; do
+  if ! type -P "$cmd" > /dev/null; then
+    printf 'guard: required executable not found in PATH: %s\n' "$cmd" >&2
+    exit 127
+  fi
+done
 
 # Load ONLY AGENTROUTER_KEY_1 / AGENTROUTER_KEY_2, without printing
 # them and without sourcing the whole keys file (which also contains
 # other values the worker does not need).
-while IFS='=' read -r name value; do
+# Disable tracing before key exports, including tracing from bash -x.
+set +x
+while IFS='=' read -r name value || [[ -n "$name" || -n "$value" ]]; do
   case "$name" in
-    AGENTROUTER_KEY_1|AGENTROUTER_KEY_2) export "$name=$value" ;;
+    AGENTROUTER_KEY_1|AGENTROUTER_KEY_2) export "$name=$value" || exit 1 ;;
   esac
-done < "$HOME/workspace/.agentrouter-keys"
-export AGENTROUTER_JOBS_PATH="$JOBS_DIR"
-cd "$ROOT" || exit 1
-setsid nohup node dist/src/worker.js >> "$JOBS_DIR/worker.log" 2>&1 < /dev/null &
-echo "worker relaunched pid $!"
+done < "$HOME/workspace/.agentrouter-keys" || exit 1
+export AGENTROUTER_JOBS_PATH="$JOBS_DIR" || exit 1
+
+# Open redirections in the foreground so failures are not hidden by '&'.
+{
+  setsid nohup node dist/src/worker.js 2>&1 &
+  launcher_pid=$!
+} >> "$JOBS_DIR/worker.log" < /dev/null || exit 1
+printf 'worker launch requested (launcher pid %s)\n' "$launcher_pid"

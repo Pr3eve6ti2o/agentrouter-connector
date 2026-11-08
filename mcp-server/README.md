@@ -9,7 +9,7 @@
 
 ## 1. Scope and non-goals
 
-This guide takes you from local setup to your first routed request. It is for readers who already have a repository checkout and two AgentRouter keys and want to set up a local MCP server. It covers setup, registration with your MCP client, the six tools, troubleshooting and updating.
+This guide takes you from local setup to your first routed request. It is for readers who already have a repository checkout and two AgentRouter keys and want to set up a local MCP server. It covers setup, registration with your MCP client, the twelve tools, troubleshooting and updating.
 
 You run the server as a local Node.js process from `mcp-server/`, using the built entry point `dist/src/server.js`. Your MCP client exchanges messages with it over stdin/stdout. This is a stdio server, not an HTTP service: there is no browser URL. The server sends upstream requests through AgentRouter to the Azure pool.
 
@@ -49,13 +49,15 @@ Responsibilities belong to roles; one person may hold more than one.
 
 The server is a local Node.js process from `mcp-server/`, with entry point `dist/src/server.js`. It uses stdio (`stdin`/`stdout`), not HTTP. For a registered server, the client—Codex or Claude Code—launches `node`.
 
+The server is written in strict TypeScript. Shared code lives in `mcp-server/src/env.ts` (`parseApiKeys`, `parseHosts` and the shared `clientHeaders`) and `mcp-server/src/sse.ts` (the `readSseEvents` async generator that parses the streamed response). File jobs run in a separate worker process, `node dist/src/worker.js`, which boots with only the two keys set and records its PID in `jobs/worker.pid`. The root MCP v2.0.0 stack and `mcp-server` stay separate, with no cross-stack imports and separate ledger files.
+
 `stdout` is MCP traffic only; diagnostics belong on `stderr`.
 
 The configuration loader validates on import. The user owns preparing the configuration and running the checks; the key holder owns the secrets used by that configuration.
 
 The server sends upstream requests through AgentRouter to the Azure pool. In MCP v2, requests rotate over host × key combos (`agentrouter.org/key1` → `agentrouter.org/key2` → `ps.air-outer.com/key1` → `ps.air-outer.com/key2`, then repeat, up to 3 rounds by default), retrying 401, 402, 403, 429, 502, 503, 504 and transport failures, and stopping immediately on 400, 404 and other 4xx. This routing does not transfer ownership of provisioning, models, channels or quota to the local server.
 
-**MCP v2 at a glance — what this server takes care of:** rotating hosts and keys until a transient failure clears (or the retry budget runs out); classifying failures by status *and* body (so a 401 header rejection is never mistaken for a dead key); recording every attempt in a local ledger with host, key index, kind, attempts and latency — never a key value; probing both hosts for health and diagnosis; and applying safe Astra defaults (12,000 tokens, sequential batches, `low` effort rejected). It does not provision accounts, grant quota, make a model available, fix the gateway, or protect a chained Codex session. Full troubleshooting: [docs/MCP-SERVER.md](../docs/MCP-SERVER.md).
+**MCP v2 at a glance — what this server takes care of:** rotating hosts and keys until a transient failure clears (or the retry budget runs out); classifying failures by status *and* body (so a 401 header rejection is never mistaken for a dead key); recording every attempt in a local ledger with host, key index, kind, attempts and latency — never a key value; probing both hosts for health and diagnosis; and applying safe Astra defaults (32,000 tokens from `config.astraMaxTokens`, sequential batches, `low` effort rejected). It does not provision accounts, grant quota, make a model available, fix the gateway, or protect a chained Codex session. Full troubleshooting: [docs/MCP-SERVER.md](../docs/MCP-SERVER.md).
 
 Check launch, MCP exchange and upstream execution separately. A running process does not prove a successful MCP exchange. A successful MCP exchange does not, by itself, prove that the Azure pool executed a request.
 
@@ -70,7 +72,7 @@ Start with your task, not a reading order. Shortcuts do not bypass readiness gat
 | connect an MCP client | [9. Codex and Claude Code registration](#9-codex-and-claude-code-registration); [10. Tool discovery](#10-tool-discovery) | Build, smoke and manual stdio gates passed; results remain current under [18. Readiness gates](#18-readiness-gates). |
 | change keys or model limits | [5. Install, environment and count check](#5-install-environment-and-count-check); [2. Architecture and responsibilities](#2-architecture-and-responsibilities) | Configuration responsibilities and secret-handling rules in [17. Security posture](#17-security-posture) understood. |
 | rebuild after a code change | [6. Build](#6-build); [7. Smoke check](#7-smoke-check) | Prerequisites, installation, environment and count checks passed for the changed checkout. |
-| run a first routed request | [11. First routed request](#11-first-routed-request); [12. The six MCP tools](#12-the-six-mcp-tools) | All earlier readiness gates passed, including client registration and tool discovery; results remain current. |
+| run a first routed request | [11. First routed request](#11-first-routed-request); [12. The twelve MCP tools](#12-the-twelve-mcp-tools) | All earlier readiness gates passed, including client registration and tool discovery; results remain current. |
 | investigate a failed check | [13. Troubleshooting by symptom](#13-troubleshooting-by-symptom); [14. Short FAQ](#14-short-faq); [16. Primary references](#16-primary-references) | Failed step or symptom identified; available output retained. No passing check required to troubleshoot. |
 | update after pulling changes | [15. Updating and rebuilding](#15-updating-and-rebuilding) | Changes have been pulled into an existing checkout. |
 
@@ -276,7 +278,7 @@ You should see: Each required variable name is listed once with count `1` — 14
 
 `.env` lives at `mcp-server/.env`. Sourcing it in a shell only affects that shell (see section 7). The client-launched server in section 9 needs the full set of environment variables—both keys and all 12 limit values—through the client configuration, because the server does not read `.env` by itself.
 
-**MCP v2 (2026-10-31) optional variables, all with defaults — a server started with only the original 14 variables keeps working unchanged:** `AGENTROUTER_HOSTS` (default `agentrouter.org,ps.air-outer.com`), `AGENTROUTER_RETRY_ROUNDS` (default `3`), `AGENTROUTER_TIMEOUT_MS` (default `600000`), `AGENTROUTER_ASTRA_MAX_TOKENS` (default `12000`).
+**MCP v2 (2026-10-31) optional variables, all with defaults — a server started with only the original 14 variables keeps working unchanged:** `AGENTROUTER_HOSTS` (default `agentrouter.org,ps.air-outer.com`), `AGENTROUTER_RETRY_ROUNDS` (default `3`), `AGENTROUTER_TIMEOUT_MS` (default `1200000`), `AGENTROUTER_ASTRA_MAX_TOKENS` (default `32000`).
 
 ## 6. Build
 
@@ -505,6 +507,12 @@ Paste this into the client:
   - `agentrouter_health`
   - `agentrouter_diagnose`
   - `agentrouter_generate_config`
+  - `agentrouter_submit_job`
+  - `agentrouter_job_status`
+  - `agentrouter_job_result`
+  - `agentrouter_list_jobs`
+  - `agentrouter_cancel_job`
+  - `agentrouter_resume_job`
 - No connection or initialisation error.
 
 Capture the client’s actual tool-list response, including the returned names and required arguments. Do not move on to provider checks until you have that evidence and have resolved any discovery errors or build mismatch. Use the names and schemas your client reports for your build rather than guessing tool names or copying this guide’s names blindly.
@@ -512,7 +520,7 @@ Capture the client’s actual tool-list response, including the returned names a
 **If discovery fails or the list differs:**
 
 - **Connection or initialisation error:** follow section 13.
-- **Tool list differs from the six above:** treat this as a signal to check that you are running the rebuilt output. Verify that the client launch target is the rebuilt `dist/src/server.js` (see section 15), then start a fresh session and repeat the exchange.
+- **Tool list differs from the twelve above:** treat this as a signal to check that you are running the rebuilt output. Verify that the client launch target is the rebuilt `dist/src/server.js` (see section 15), then start a fresh session and repeat the exchange.
 
 Discovery proves that the MCP exchange works. It does **not** prove that any model is available or that any key is valid.
 
@@ -541,7 +549,7 @@ This is a live request and may use paid quota. Set effort to **low** for this ch
 
 A successful tool result containing `OK` proves that one routed request worked for that model/key at that time. It does not prove other models work, future availability, failover, or ledger coverage.
 
-## 12. The six MCP tools
+## 12. The twelve MCP tools
 
 Paste tool requests into your MCP client, not your shell. Replace `<model-id>` with an ID returned by `agentrouter_list_models`.
 
@@ -554,6 +562,7 @@ Use the tool names and schemas your client reports for your build. The repo file
 | `agentrouter_list_models` | Returns a dynamic list of model IDs. | Complete input contract. |
 | `agentrouter_chat` | Sends one prompt to one model; supports the `low`/`max` effort guidance below, except Astra rejects `low`. Rotates host × key (see below). | Complete input contract beyond that guidance. |
 | `agentrouter_batch_chat` | Up to 32 tasks; concurrency cap 8, default 1 for Astra, otherwise 8; ordered per-item results with attempts, host, keyIndex and kind; retries every task through the same rotation. | Per-item input contract beyond model + prompt; cap-violation handling beyond the 32-task limit. |
+| `agentrouter_submit_job`, `agentrouter_job_status`, `agentrouter_job_result`, `agentrouter_list_jobs`, `agentrouter_cancel_job`, `agentrouter_resume_job` | Submit returns a job ID at once; the worker generates the output. Status, result, list, cancel and resume read or change job state without calling the gateway. | Complete input contracts. |
 
 ### `agentrouter_list_models`
 
@@ -565,7 +574,7 @@ Use this to find the model IDs you can use. The list is **dynamic**: listing a m
 
 Send one prompt to one model. Set `effort` to `low` for checks — except for `gpt-6-astra`, where `low` is rejected; for Astra, omit effort (no reasoning field is sent) or use `max`. Effort can go up to `max` for harder work.
 
-**MCP v2 rotation and failover (supersedes the pre-v2 502 gap):** requests rotate over host × key combos in order `agentrouter.org/key1`, `agentrouter.org/key2`, `ps.air-outer.com/key1`, `ps.air-outer.com/key2`, then repeat, for up to `AGENTROUTER_RETRY_ROUNDS` rounds (default 3 = 12 attempts), with a 2–5 s plus jitter pause between attempts. Retryable: 401, 402, 403, 429, 502, 503, 504, plus transport failures (fetch throw, connection closed, timeout). Non-retryable: 400, 404 and other 4xx break immediately. Responses timeout is 600 s by default; Anthropic `/messages` is 120 s unless overridden. For `gpt-6-astra`, `agentrouter_chat` defaults to 12000 output tokens (`AGENTROUTER_ASTRA_MAX_TOKENS`), caller-overridable to at most 16000.
+**MCP v2 rotation and failover (supersedes the pre-v2 502 gap):** requests rotate over host × key combos in order `agentrouter.org/key1`, `agentrouter.org/key2`, `ps.air-outer.com/key1`, `ps.air-outer.com/key2`, then repeat, for up to `AGENTROUTER_RETRY_ROUNDS` rounds (default 3 = 12 attempts), with a 2–5 s plus jitter pause between attempts. Retryable: 401, 402, 403, 429, 502, 503, 504, plus transport failures (fetch throw, connection closed, timeout). Non-retryable: 400, 404 and other 4xx break immediately. Responses timeout is 1200 s by default; Anthropic `/messages` uses the fixed 120 s `ANTHROPIC_TIMEOUT_MS` constant in `upstream.ts`. For `gpt-6-astra`, `agentrouter_chat` defaults to 32000 output tokens via the shared `config.astraMaxTokens` ceiling (`AGENTROUTER_ASTRA_MAX_TOKENS`, default 32000, clamped to 1000–32000), caller-overridable up to `config.astraMaxTokens` with an absolute ceiling of 32000.
 
 The server appends a local ledger entry to `ledger.jsonl` by default, or to the path set by `AGENTROUTER_LEDGER_PATH`, carrying timestamp, model, tokens, host, key **index** (never a key value), status (or `null` for transport failure), error kind, attempts used, latency, and reasoning/text tokens. Relative paths are resolved against the server process working directory. Ledger writes are best-effort and must not fail the chat.
 
@@ -575,13 +584,28 @@ For the default ledger, run `tail -n 1 ledger.jsonl` in a shell from the server 
 
 ### `agentrouter_batch_chat`
 
-Send several requests in one batch. A batch accepts at most **32 tasks**; more throws a `RangeError`. Concurrency is capped at **8 tasks at once**, with a default of 1 (sequential) when any task uses `gpt-6-astra`, otherwise 8; the caller may override 1–8. Split larger jobs into separate batches.
+Send several requests in one batch. The task cap comes from `caps.maxBatchTasks` in configuration (default **32 tasks**); exceeding it throws a `RangeError`. The concurrency cap comes from `caps.maxConcurrency` (default **8 tasks at once**). With the default configuration, concurrency is 1 (sequential) when any task uses `gpt-6-astra`, otherwise 8; the caller may override 1–8. Split larger jobs into separate batches.
+
 
 Per-item results are `ok`/`error` pairs in request order, each carrying index, attempts used, host and `keyIndex`, plus a classified kind on failures, so a caller can re-submit only failed tasks. Partial failure is normal: a failed item does not fail the whole batch.
 
 **MCP v2: batch now retries every task through the same host × key rotation as a single chat.** The pre-v2 warning that batch does not retry 502 failures no longer applies.
 
 **You should see:** a response or a per-item error for each request.
+
+### The six job tools
+
+These six tools never call the gateway themselves; only the independent worker does.
+
+- `agentrouter_submit_job`: submits a Responses-model generation as a persistent job and returns its job ID immediately; the independent worker generates the output. Responses models only, not Claude.
+- `agentrouter_job_status`: reads a job's status, host/keyIndex, attempts, partial/output sizes and error without calling the gateway.
+- `agentrouter_job_result`: returns a completed job's full output text, or the saved partial text for an interrupted job.
+- `agentrouter_list_jobs`: lists persistent jobs, oldest first, without calling the gateway.
+- `agentrouter_cancel_job`: cancels a pending or running job; a running worker aborts its gateway call within seconds and keeps the saved partial.
+- `agentrouter_resume_job`: re-queues an interrupted or failed job for an explicit new generation; this is the only way an interrupted job regenerates.
+
+**You should see:** the job ID from `agentrouter_submit_job`, then status from `agentrouter_job_status` and the result from `agentrouter_job_result`.
+
 ### `agentrouter_health`
 
 Check the router’s current health. Health alone does not prove that a model will serve a request.
@@ -795,7 +819,7 @@ Mark each gate pass or fail. Treat an unmet or unverified check as a failure. A 
 | Build | Verify the current build (section 6). | `dist/src/server.js` has been built from the current checkout. | That the client launches this build. |
 | Client target | Verify the launch path and restart (sections 9, 15). | The client launches the rebuilt artefact path, and the server process has actually been restarted. | A working stdio connection or successful tool execution. |
 | Stdio | Test through the client (section 10). | The client initialises successfully over stdio and completes `tools/list`. | That listed tools execute successfully. |
-| Six tools | Compare the tool inventory (sections 10, 12). | The client lists all six tools expected for this build. | That every tool works or `generate_config` preserves unrelated settings. |
+| Twelve tools | Compare the tool inventory (sections 10, 12). | The client lists all twelve tools expected for this build. | That every tool works or `generate_config` preserves unrelated settings. |
 | Live model list | Fetch models per key (section 13). | Current model IDs are fetched for each configured key, with HTTP 200 for every response. | Access to every listed model or a successful routed request. |
 | Routed request | Make an end-to-end request (section 11). | One request through an agentrouter tool, using a model from the live list, returns OK. | Access to other models, future availability, failover or complete ledger/health coverage. |
 

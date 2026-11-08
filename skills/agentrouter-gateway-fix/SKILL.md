@@ -48,7 +48,7 @@
   node dist/src/server.js
   ```
 
-- Start the worker separately only for worker jobs, from the same directory after building and configuring its process environment. Check whether an owned worker is already running before starting another.
+- Start the worker separately only for worker jobs, from the same directory after building and configuring its process environment. Check whether an owned worker is already running before starting another. Use the `jobs/worker.pid` check described in [the repository map](references/repo-map.md).
 
   ```sh
   node dist/src/worker.js
